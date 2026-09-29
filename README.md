@@ -36,4 +36,4 @@ dump, which is not included.
 
 ## Nexus
 
-NEXUS_LINK_PLACEHOLDER
+https://www.nexusmods.com/helldivers2/mods/16624
