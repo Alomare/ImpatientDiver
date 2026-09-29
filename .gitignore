@@ -1,0 +1,10 @@
+# Release builds and the Nexus page text
+build/
+nexus_description.txt
+__pycache__/
+# Research tooling tied to the private game.dll dump, and one-off research builds
+research/ghidra_scripts/
+research/fix_dump.py
+research/flag_refs.py
+research/recon*.lua
+research/test_recon*.py
