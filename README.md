@@ -1,3 +1,5 @@
+<img width="1920" height="1080" alt="thumbnail" src="https://github.com/user-attachments/assets/ce926f10-3180-41b0-ada4-a833200ba89e" />
+
 # Impatient Diver
 
 A Helldivers 2 Lua mod (Bingus Shared Loader) that skips the log-in ship intro, the cryo pod transition and the FTL
