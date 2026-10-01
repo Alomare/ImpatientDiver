@@ -1,6 +1,7 @@
 # Release builds and the Nexus page text
 build/
 nexus_description.txt
+todo.txt
 __pycache__/
 # Research tooling tied to the private game.dll dump, and one-off research builds
 research/ghidra_scripts/
