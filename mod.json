@@ -5,7 +5,7 @@
     "entry": "skip_intro_animation.lua",
     "version": "4",
     "icon": "icon.png",
-    "description": "Skips the log-in ship intro, the cryo pod transition and the FTL jump. With Mod Options Menu installed, set each one to Off, Manual (press spacebar) or Automatic in the escape menu under MODS; without it, all three are Automatic.",
+    "description": "Allows skipping some gameplay transitions automatically or with a key press. Configurable with Mod Options Menu.",
     "requires": [
         "Bingus Shared Loader v17 or newer"
     ]
