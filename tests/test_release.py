@@ -230,6 +230,7 @@ function fake.game_update()
     local current, phase = fake.scene()
     local plan = PLANS[current]
     local tm = plan and plan.timers[phase]
+    if fake.frozen and fake.restamp then fake.set_stamp(0x88, fake.now()) end
     if fake.frozen or not tm then return end
     if tm[1] and fake.stamp(tm[1]) + tm[2] > fake.now() then return end
     if tm.open_in and fake.opened ~= current then fake.opened = current; fake.open_menu(tm.open_in); return end
@@ -273,7 +274,7 @@ fake.heap(POD1, string.rep('\0', 0x10)); fake.heap(POD2, string.rep('\0', 0x10))
 write_mem(PODS + 8, le32(2)); write_mem(PODS + 0x68, le64(POD1) .. le64(POD2))
 write_mem(POD1 + 8, le32(fake.POD1)); write_mem(POD2 + 8, le32(fake.POD2))
 -- The loadout screen: the screen stack (type at +0, screen at +0xb0), the intro timer (+0x273988) and phase (+0x27398c).
-fake.patch(0x347ce38, le64(STK)); fake.heap(STK, string.rep('\0', 0xc0)); fake.heap(SCR + 0x273980, string.rep('\0', 0x10))
+fake.patch(0x347ce38, le64(STK)); fake.heap(STK, string.rep('\0', 0xc0)); fake.heap(SCR + 0x273980, string.rep('\0', 0x50))
 local function u32_at(a) local v = ffi.new('uint32_t[1]'); ffi.copy(v, read_mem(a, 4), 4); return tonumber(v[0]) end
 local function f32_at(a) local v = ffi.new('float[1]'); ffi.copy(v, read_mem(a, 4), 4); return tonumber(v[0]) end
 fake.u32_at = u32_at
@@ -316,13 +317,50 @@ function fake.seat_update()
     end
 end
 
+-- The drop location zoom (the loadout screen's update, game.dll 0x1468320): the pick sets the screen's zoom target
+-- (+0x2739c4) to 1; while the drop group ([0x3326aa0], players at +0x4ec0) has players, its zoom progress (+0x4f64)
+-- moves toward the target at 1 per second; on the map page (screen + 8 = 0) with both at 1 the loadout page opens.
+-- Without players the page opens at once.
+ZG = 0x2e000000
+fake.patch(0x3326aa0, le64(ZG)); fake.heap(ZG + 0x4ec0, string.rep('\0', 0xc0))
+write_mem(ZG + 0x4ec0, le32(1))
+fake.heap(ZG + 0x55f680, string.rep('\0', 0x10)); fake.heap(SCR + 0x27f0, string.rep('\0', 0x20))
+fake.heap(SCR, string.rep('\0', 0x10))
+function fake.set_page(page) write_mem(SCR + 8, le32(page)) end
+function fake.open_loadout(page)  -- the Hellpod briefing's loadout screen, on a page
+    fake.set_presenter(14); write_mem(STK, le32(11)); write_mem(STK + 0xb0, le64(SCR)); fake.set_page(page)
+end
+function fake.pick_drop() write_mem(SCR + 0x2739c4, f32(1)); fake.picked, fake.zoom_frames = fake.frame, nil end
+function fake.back_to_map() fake.set_page(0); write_mem(SCR + 0x2739c4, f32(0)) end
+function fake.zoom_progress() return f32_at(ZG + 0x4f64) end
+function fake.zoom_synced() return f32_at(ZG + 0x55f680) end
+function fake.loadout_update(dt)
+    if not fake.menu_open(14) or u32_at(STK) ~= 11 then return end
+    local target, progress = f32_at(SCR + 0x2739c4), f32_at(ZG + 0x4f64)
+    local players = u32_at(ZG + 0x4ec0) > 0
+    if players and progress ~= target then
+        progress = target > progress and math.min(target, progress + dt) or math.max(target, progress - dt)
+        write_mem(ZG + 0x4f64, f32(progress))
+    end
+    local synced = f32_at(ZG + 0x55f680)  -- the leader's progress, as the network messages bring it
+    if not players and synced < target then synced = math.min(target, synced + dt); write_mem(ZG + 0x55f680, f32(synced)) end
+    local follows = not players and read_mem(SCR + 0x27fe, 1):byte() == 0
+    if u32_at(SCR + 8) == 0 and target == 1 and ((players and progress == 1) or (follows and synced == 1)) then
+        fake.set_page(1)
+        fake.zoom_frames = fake.frame - fake.picked
+        fake.calls[#fake.calls + 1] = 'loadout page'
+    end
+end
+
 function fake.frame_step(n)
     for _ = 1, n or 1 do
         fake.frame = fake.frame + 1
-        if fake.tick then fake.set_now(fake.now() + 16000) end
-        update(0.016)
+        local dt = fake.dt or 0.016
+        if fake.tick then fake.set_now(fake.now() + math.floor(dt * 1e6)) end
+        update(dt)
         fake.game_update()
         fake.seat_update()
+        fake.loadout_update(dt)
     end
 end
 function fake.calls_text() local s = table.concat(fake.calls, ';'); fake.calls = {}; return s end
@@ -337,6 +375,8 @@ def check(cond, what):
 
 
 CHOICE = {'off': 1, 'key': 2, 'auto': 3}
+QUICK = ('hellpod', 'zoom')  # Off / Automatic only
+QUICK_CHOICE = {'off': 1, 'auto': 2}
 
 
 def new_game(settings, image, prepare='', menu=True):
@@ -345,10 +385,10 @@ def new_game(settings, image, prepare='', menu=True):
     logdir = tempfile.mkdtemp(prefix='sia_rel_')
     lua = LuaRuntime(unpack_returned_tuples=True)
     lua.execute(HARNESS, logdir, image)
-    values = {'login': 1, 'pod': 1, 'ftl': 1, 'hellpod': 1}
+    values = {'login': 1, 'pod': 1, 'ftl': 1, 'hellpod': 1, 'zoom': 1}
     for name in settings:
         feature, mode = name.split('_')
-        values[feature] = CHOICE[mode]
+        values[feature] = (QUICK_CHOICE if feature in QUICK else CHOICE)[mode]
     for feature, value in values.items():
         lua.execute(f"fake.values['{feature}'] = {value}")
     if not menu:
@@ -391,15 +431,20 @@ def main():
           'every skip Off: the map exit alone, update chained: %r' % (status.splitlines()[:1],))
     opts = f.options
     ids = sorted(opts.keys()) if opts else []
-    skips = ['alomare.skip_intro_animation.' + k for k in ('ftl', 'login', 'pod', 'hellpod')]
+    skips = ['alomare.skip_intro_animation.' + k for k in ('ftl', 'login', 'pod', 'hellpod', 'zoom')]
+    quick = ['alomare.skip_intro_animation.' + k for k in QUICK]
     check(ids == sorted(skips)
-          and all(opts[i].mod == 'Impatient Diver' and opts[i].default == 3 and opts[i].type == 'choice'
-                  and list(opts[i].choices.values()) == ['Off', 'Manual', 'Automatic'] for i in skips)
-          and [opts['alomare.skip_intro_animation.' + k].label for k in ('login', 'pod', 'ftl', 'hellpod')]
-          == ['Log-in Ship Intro', 'Cryo Pod Transition', 'FTL Transition', 'Hellpod to Loadout'],
-          'four Off/Manual/Automatic options (no map toggle), Automatic by default')
+          and all(opts[i].mod == 'Impatient Diver' and opts[i].type == 'choice' for i in skips)
+          and all(opts[i].default == 3 and list(opts[i].choices.values()) == ['Off', 'Manual', 'Automatic']
+                  for i in skips if i not in quick)
+          and all(opts[i].default == 2 and list(opts[i].choices.values()) == ['Off', 'Automatic'] for i in quick)
+          and [opts['alomare.skip_intro_animation.' + k].label for k in ('login', 'pod', 'ftl', 'hellpod', 'zoom')]
+          == ['Log-in Ship Intro', 'Cryo Pod Transition', 'FTL Transition', 'Hellpod to Loadout', 'Drop Location Zoom'],
+          'three Off/Manual/Automatic options and two Off/Automatic ones (no map toggle), Automatic by default')
     check(f.map_bound == 'alomare.skip_intro_animation.map|Close galactic map',
           'the map key is a Mod Bindings Menu binding: %r' % f.map_bound)
+    check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene',
+          'the skip binding is registered with every skip Off: %r' % f.bound)
     f.apply('login', 3)
     f.frame_step(1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
@@ -411,7 +456,7 @@ def main():
     f.set_scene(7, 1)
     f.frame_step(3)
     check(f.calls_text().startswith('update 7 1->2'), 'the skip turned on in the menu works at once')
-    f.set_scene(0, 0); f.frame_step(1000); f.calls_text()
+    f.set_scene(0, 0); f.frame_step(1900); f.calls_text()
     f.apply('login', 1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
     f.set_stamp(0x88, NOW - 100000); f.set_scene(7, 1)
@@ -430,11 +475,14 @@ def main():
     f = fake(lua)
     f.frame_step(1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 5 feature(s) active') and 'Settings: defaults, every feature on' in status
-          and status.count(': Automatic (') == 4 and ': Manual (' not in status
+    check(status.startswith('OK - 6 feature(s) active') and 'Settings: defaults, every feature on' in status
+          and status.count(': Automatic (') == 5 and 'Drop location zoom: Automatic (map zoom)' in status and ': Manual (' not in status
           and 'Hellpod to loadout: Automatic (seat transition, briefing intro)' in status
           and 'Galactic map quick exit: On' in status,
           'without Mod Options Menu: every skip Automatic, the map exit on: %r' % (status,))
+    f.frame_step(1)
+    check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene',
+          'the skip binding is registered with every skip Automatic: %r' % f.bound)
 
     # 1c. Mod Options Menu loaded after this addon: connected on a later frame, its values take over.
     lua, logs = new_game(['pod_key'], image, menu=False)
@@ -447,6 +495,14 @@ def main():
           and 'Cryo pod transition: Manual' in status and 'Log-in ship intro: Off' in status,
           'a menu that loads later is connected and its values apply: %r' % (status,))
 
+    # 1c'. Saved values from the three-choice versions: Manual (2) and Automatic (3) on a quick option are Automatic.
+    lua, logs = new_game([], image, "fake.values['hellpod'] = 3; fake.values['zoom'] = 2")
+    f = fake(lua)
+    f.frame_step(2)
+    status = text(logs / 'ImpatientDiver_STATUS.log')
+    check('Hellpod to loadout: Automatic' in status and 'Drop location zoom: Automatic' in status,
+          'old saved choices on the quick options read as Automatic: %r' % (status.splitlines()[-3:-1],))
+
     # 1d. A menu that gives no value (or registration fails): that feature stays on.
     lua, logs = new_game([], image, "fake.option_menu.get = function() return nil end; "
                                     "local reg = fake.option_menu.register_option; fake.option_menu.register_option = "
@@ -454,7 +510,7 @@ def main():
     f = fake(lua)
     f.frame_step(1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 5 feature(s) active') and 'not registered: full' in text(logs / 'ImpatientDiver.log'),
+    check(status.startswith('OK - 6 feature(s) active') and 'not registered: full' in text(logs / 'ImpatientDiver.log'),
           'no value from the menu, or a failed registration, keeps the defaults: %r' % (status,))
 
     # 1e. Mod Options Menu v1.1 (version 2): texts are functions in the game's language (English here); OFF stays the
@@ -497,7 +553,8 @@ def main():
                                       'Cryo pod transition: Manual (ship_teleporter_arrival)',
                                       'FTL transition: Automatic (ship_planet_departure, ship_planet_arrival, ship_teleporter_network_join)'],
           'status file: verdict first, then each skip: %r' % (status,))
-    check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene' or f.bound is None, 'binding id and label')
+    f.frame_step(1)
+    check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene', 'binding id and label')
 
     # Log-in intro, automatic: both scenes fast-forwarded; the game changes every phase itself, through the
     # bridge intro's own done phase (no interrupt, no posted audio).
@@ -512,7 +569,7 @@ def main():
     check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene', 'Mod Bindings Menu binding registered for key mode')
 
     # Cryo pod, key mode: nothing until spacebar; then the game's own update runs every phase.
-    f.frame_step(950)  # let the log-in chain run out
+    f.frame_step(1900)  # let the log-in chain run out
     f.calls_text()
     f.set_stamp(0x88, NOW - 1000000); f.set_stamp(0x90, NOW - 200000)
     f.set_scene(13, 2)
@@ -530,7 +587,7 @@ def main():
           'spacebar fast-forwards the pod; phase 3 held for the body placement: %r %r %r' % (moved, held, finished))
 
     # FTL, automatic: departure then arrival, fades held clear; the chain does not enter a key-mode pod.
-    f.frame_step(950)  # let the pod's key-press chain run out
+    f.frame_step(1900)  # let the pod's key-press chain run out
     f.calls_text()
     f.set_stamp(0x88, NOW - 1000000); f.fader(0.5, 1.0)
     f.set_scene(12, 3)
@@ -558,7 +615,7 @@ def main():
     f.frame_step(3)
     check(f.stamp(0x88) == NOW + 5 and 'timer ahead of the clock' in text(logs / 'ImpatientDiver.log'),
           'a timer ahead of the clock is never written')
-    f.set_scene(0, 0); f.frame_step(1000)
+    f.set_scene(0, 0); f.frame_step(1900)
 
     # Scenes outside the list are never touched, whatever the key.
     f.set_scene(5, 1); f.set_stamp(0x88, NOW - 1000000)
@@ -677,8 +734,9 @@ def main():
     f.space = True; f.frame_step(1); f.space = False; f.frame_step(3)
     check(f.fade() == '0.50/1.00', 'the fade is not touched during the pod either')
 
-    # 5f. A long loading wait (a phase without a step) never times out; a timed phase that doesn't move on does, and
-    #     an automatic skip that timed out is not restarted for the same scene.
+    # 5f. A long loading wait never times out: a phase without a step, or a timed phase whose timer is over (it waits
+    #     on loading too); a timed phase whose timer the game keeps resetting does, and an automatic skip that timed out
+    #     is not restarted for the same scene.
     lua, logs = new_game(['ftl_auto'], image)
     f = fake(lua)
     f.frame_step(1)
@@ -691,9 +749,70 @@ def main():
     f.set_stamp(0x88, NOW - 1000000); f.write(0x20000060, f.le32(3))
     f.frame_step(2600)
     log = text(logs / 'ImpatientDiver.log')
-    check(loading and log.count('Skip started (automatic)') == 1
+    timer_over = 'timed out' not in log and f.stamp(0x88) == NOW - 5000000
+    f.restamp = True
+    f.frame_step(1400)
+    log = text(logs / 'ImpatientDiver.log')
+    check(loading and timer_over and log.count('Skip started (automatic)') == 1
           and log.count('Fast-forward timed out (ship_teleporter_network_join phase 3)') == 1,
-          'loading waits never time out; a stuck timed phase does once, and is not restarted')
+          'loading waits never time out (timer over: %r); a phase whose timer keeps resetting does once, and is not '
+          'restarted' % timer_over)
+
+    # 5g. Manual FTL with a slow load: the press is followed through a long wait in the departure (its timer done,
+    #     the next scene still loading) into the arrival, with no second press.
+    lua, logs = new_game(['ftl_key'], image)
+    f = fake(lua)
+    f.frame_step(1)
+    f.set_now(NOW); f.set_stamp(0x88, NOW - 1000000)
+    f.frozen = True
+    f.set_scene(12, 3)
+    f.frame_step(5)
+    f.space = True; f.frame_step(1); f.space = False
+    f.frame_step(2500)  # 40 s of loading
+    f.frozen = False
+    f.frame_step(5)
+    slow = f.calls_text()
+    log = text(logs / 'ImpatientDiver.log')
+    check(slow == 'update 12 3->4;update 11 2->3' and 'timed out' not in log and log.count('Skip started') == 1,
+          'one press follows a 40 s load into the arrival: %r' % slow)
+
+    # 5h. A press between two scenes (a loading screen after a Manual scene) carries into the next one; a press a
+    #     frame before a scene starts counts for it; a press long before (or with no Manual scene before) does not.
+    lua, logs = new_game(['ftl_key', 'pod_key'], image)
+    f = fake(lua)
+    f.frame_step(1)
+    f.set_now(NOW); f.set_stamp(0x88, NOW - 1000000)
+    f.set_scene(15, 1)  # waits on loading
+    f.frame_step(30)
+    f.set_scene(0, 0)
+    f.frame_step(300)
+    f.space = True; f.frame_step(1); f.space = False
+    f.frame_step(300)
+    f.set_scene(13, 2); f.set_stamp(0x90, NOW - 200000)
+    f.frame_step(40)
+    gap = f.calls_text()
+    log = text(logs / 'ImpatientDiver.log')
+    check(gap == 'update 13 2->3;update 13 3->4;update 13 4->5' and 'Skip started (key press between scenes)' in log,
+          'a press on the loading screen between scenes skips the next one: %r' % gap)
+    lua, logs = new_game(['ftl_key'], image)
+    f = fake(lua)
+    f.frame_step(1)
+    f.set_now(NOW)
+    f.space = True; f.frame_step(1); f.space = False
+    f.frame_step(120)
+    f.set_stamp(0x88, NOW - 1000000); f.set_scene(11, 2)
+    f.frame_step(30)
+    early = f.calls_text()
+    lua, logs = new_game(['ftl_key'], image)  # no Manual scene before: only the kept press counts
+    f = fake(lua)
+    f.frame_step(1)
+    f.set_now(NOW)
+    f.space = True; f.frame_step(1); f.space = False
+    f.set_stamp(0x88, NOW - 1000000); f.set_scene(11, 2)
+    f.frame_step(3)
+    late_by_a_frame = f.calls_text()
+    check(early == '' and late_by_a_frame == 'update 11 2->3',
+          'a press 2 s before a scene is not kept %r; one a frame before is %r' % (early, late_by_a_frame))
 
     # 6. Galactic Map Quick Exit (always on): Escape or the Mod Bindings Menu key on the map sets the Hologram
     #    presenter's close request (the game's presenter manager then closes it); nothing elsewhere.
@@ -791,25 +910,6 @@ def main():
     check(all(n is not None and n >= 120 for n in (exit_frames, other_frames, mission_frames)),
           'an exit, another seat and a mission seat play normally: %r frames' % ([exit_frames, other_frames, mission_frames],))
 
-    # 8b. Manual: nothing without the key; a press during the move skips the rest.
-    lua, logs = new_game(['hellpod_key'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_now(NOW); f.tick = True; f.set_game_state(3)
-    f.frame_step(30)
-    f.seat_move(f.POD2, 3)
-    f.frame_step(400)
-    natural = (f.seat_frames, f.ui_frames)
-    f.set_presenter(0); f.write(0x2b000000, f.le32(0)); f.seat_free(); f.frame_step(30); f.calls_text()
-    f.seat_move(f.POD2, 3)
-    f.frame_step(20)
-    f.space = True; f.frame_step(1); f.space = False; f.frame_step(20)
-    pressed = (f.seat_frames, f.ui_frames)
-    log = text(logs / 'ImpatientDiver.log')
-    check(natural[0] >= 180 and natural[1] >= 300 and pressed[0] <= 30 and pressed[1] <= 40
-          and 'Hellpod entry: started (waiting for the skip key)' in log and 'Hellpod entry: skip started (key press)' in log,
-          'hellpod entry, Manual: untouched without the key %r, skipped with it %r' % (natural, pressed))
-
     # 8c. The seat wait's code missing: the hellpod entry is unavailable and the seat plays normally.
     rva, code = sig_bytes(image, 'seat_wait')
     lua, logs = new_game(['hellpod_auto'], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
@@ -831,6 +931,81 @@ def main():
     status = text(logs / 'ImpatientDiver_STATUS.log')
     check('Hellpod to loadout: NOT AVAILABLE, plays normally (the avatar lookup calls another resolver)' in status,
           'the avatar lookup must call the resolver found: %r' % (status.splitlines()[-3:],))
+
+    # 8f. Drop location zoom (Automatic): a pick on the map sets the zoom's progress to 1, so the loadout page opens at
+    #     once; going back to the map (the zoom going back to 0) is left alone, and a second pick is skipped again;
+    #     without a drop group, or outside the briefing, nothing is written.
+    lua, logs = new_game(['zoom_auto'], image)
+    f = fake(lua)
+    f.frame_step(1)
+    v = lua.globals().ImpatientDiver._test['values']
+    check(v.zoom_group == 0x3326aa0 and v.zoom_players == 0x4ec0 and v.zoom_target == 0x2739c4
+          and v.zoom_progress == 0x4f64 and v.page == 8, 'drop location zoom offsets read from the code')
+    f.open_loadout(0)
+    f.frame_step(30); f.calls_text()
+    f.pick_drop()
+    f.frame_step(5)
+    skipped = (f.calls_text(), f.zoom_frames)
+    f.back_to_map()
+    f.frame_step(20)
+    going_back = f.zoom_progress()
+    f.frame_step(60)
+    f.calls_text()
+    f.pick_drop()
+    f.frame_step(5)
+    again = (f.calls_text(), f.zoom_frames)
+    log = text(logs / 'ImpatientDiver.log')
+    status = text(logs / 'ImpatientDiver_STATUS.log')
+    check('Drop location zoom: Automatic (map zoom)' in status and skipped == ('loadout page', 1)
+          and 0.6 < going_back < 0.8 and again == ('loadout page', 1)
+          and log.count('Drop location zoom: ended at 0.0') == 2 and 'loadout page 1 frames after the skip' in log,
+          'drop location zoom ended at once %r, back to the map untouched (%.2f), skipped again %r'
+          % (skipped, going_back, again))
+    f.back_to_map(); f.frame_step(80); f.calls_text()
+    f.write(0x2e004ec0, f.le32(0))  # no players in the drop group: the synced progress
+    f.pick_drop(); f.frame_step(5)
+    client = (f.calls_text(), f.zoom_frames)
+    f.back_to_map(); f.write(0x2e55f680, f.f32(0)); f.frame_step(5); f.calls_text()
+    f.write(0x2c0027fe, '\1')  # ... but a screen with its +0x27fe byte set doesn't wait on it
+    f.pick_drop(); f.frame_step(5)
+    no_group = (f.calls_text(), f.zoom_synced(), f.zoom_progress())
+    f.write(0x2c0027fe, '\0')
+    f.write(0x2e004ec0, f.le32(1))
+    f.back_to_map(); f.write(0x2e004f64, f.f32(0)); f.frame_step(5)
+    f.set_presenter(0); f.frame_step(20)
+    f.pick_drop(); f.frame_step(30)
+    closed = f.zoom_progress()
+    f.open_loadout(1); f.write(0x2e004f64, f.f32(0)); f.frame_step(30)
+    log = text(logs / 'ImpatientDiver.log')
+    check(client == ('loadout page', 1) and 'Drop location zoom: ended at 0.00 (synced)' in log
+          and 'Zoom state' not in log,
+          'without players in the drop group, the synced progress is ended: %r' % (client,))
+    check(no_group[0] == '' and no_group[1] < 0.2 and closed == 0.0
+          and log.count('Drop location zoom: ended at') == 3,
+          'a leading screen without players %r, outside the briefing %r or on the loadout page: nothing written'
+          % (no_group, closed))
+
+    # 8g. Drop location zoom Off: never touched, whatever the key.
+    lua, logs = new_game([], image)
+    f = fake(lua)
+    f.frame_step(1)
+    f.open_loadout(0); f.frame_step(30)
+    f.pick_drop(); f.frame_step(5)
+    f.space = True; f.frame_step(1); f.space = False; f.frame_step(80)
+    off = f.zoom_frames
+    check(off is not None and off >= 60, 'drop location zoom Off: plays in %r frames' % off)
+
+    # 8h. The zoom's code missing: the zoom is unavailable and plays normally.
+    rva, code = sig_bytes(image, 'zoom_ramp')
+    lua, logs = new_game(['zoom_auto'], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
+    f = fake(lua)
+    f.frame_step(40)
+    status = text(logs / 'ImpatientDiver_STATUS.log')
+    f.open_loadout(0); f.frame_step(30)
+    f.pick_drop(); f.frame_step(80)
+    check('Drop location zoom: NOT AVAILABLE, plays normally (code "zoom_ramp" not found)' in status
+          and f.zoom_frames is not None and f.zoom_frames >= 60,
+          'zoom code missing: the zoom plays normally: %r' % (status.splitlines()[-2:],))
 
     # 9. After a mission, with every skip Automatic and the key pressed: the extraction, the elevator ride, the wait
     #    after it and the mission end screen all play on their own time (no mission return skip).

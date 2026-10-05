@@ -2,16 +2,19 @@
 -- Impatient Diver by Alomare.
 --
 -- Skips ship sequences. Each is set in Mod Options Menu (escape menu > MODS) to Off, Manual (spacebar, plus an
--- optional Mod Bindings Menu binding) or Automatic; without that mod each is Automatic:
+-- optional Mod Bindings Menu binding) or Automatic (the two quick ones, hellpod and zoom, only Off or Automatic);
+-- without that mod each is Automatic:
 --   Log-in ship intro    ship_intro, then ship_bridge_intro
 --   Cryo pod transition  ship_teleporter_arrival (the game itself places the Helldiver at the pod exit)
 --   FTL transition       ship_planet_departure, ship_planet_arrival and ship_teleporter_network_join
 --                        (joining a lobby), with the FTL screen fades held clear
 --   Hellpod to loadout   the local Helldiver's seat transition into its hellpod, then the Hellpod briefing's intro
---                        wait (experimental); the briefing, loadout and launch are untouched
+--                        wait; the briefing, loadout and launch are untouched
+--   Drop location zoom   the zoom on the map after a drop location is picked, before the loadout page opens
 -- Every skip is a fast-forward: each scene's phases wait on timers, and the mod moves the running phase's
 -- timer on so the game's own update changes phase, with everything that phase change normally does. The hellpod
--- entry is the same idea: the seat transition waits on a deadline per step, which the mod moves to now.
+-- entry is the same idea: the seat transition waits on a deadline per step, which the mod moves to now; the drop
+-- location zoom is a progress value the game moves to 1 over a second, which the mod sets to 1.
 -- Loading waits are never skipped. (Version 1 ended the log-in intro through the game's interrupt, whose
 -- abort path left cinematic state behind that crashed the next hellpod launch.)
 --
@@ -30,7 +33,7 @@ if rawget(_G, 'ImpatientDiver') then return end
 
 local ffi = require('ffi')
 
-local M = {version = '5', frames = 0, errors = 0}
+local M = {version = '6', frames = 0, time = 0, errors = 0}
 rawset(_G, 'ImpatientDiver', M)
 
 local S = rawget(_G, 'stingray')
@@ -87,6 +90,10 @@ local SIGS = {
      fields = {screen_stack = {'rip', {3}, {7}}, screen_slot = {'u32', {10}}, local_index = {'u32', {16}}}},
     {name = 'briefing_intro', rva = 0x146909f, optional = true, text = '83 BE ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? F3 0F 10 86 ?? ?? ?? ?? F3 41 0F 5C C0 0F 2F F8 F3 0F 11 86 ?? ?? ?? ?? 0F 82 ?? ?? ?? ??',
      fields = {intro_phase = {'u32', {2}}, intro_timer = {'u32', {17, 33}}}},
+    {name = 'loadout_page', rva = 0x1470db3, optional = true, text = '44 8B 61 ?? 45 0F B6 F8 8B DA 48 8B F1 44 3B E2 0F 84 ?? ?? ?? ?? 49 89 7B 18 41 B1 01 4D 89 6B D0 45 33 C0 4D 89 73 C8 41 0F 29 7B A8 89 51 ??',
+     fields = {page = {'u8', {3, 47}}}},
+    {name = 'zoom_ramp', rva = 0x14684ef, optional = true, text = '48 8B 05 ?? ?? ?? ?? F3 44 0F 10 0D ?? ?? ?? ?? 44 39 B0 ?? ?? ?? ?? 76 ?? F3 0F 10 8E ?? ?? ?? ?? F3 0F 10 80 ?? ?? ?? ?? 0F 2E C8 7A ?? 74 ?? 41 0F 28 D8 41 0F 28 D1 E8 ?? ?? ?? ?? F3 0F 11 80 ?? ?? ?? ?? F3 0F 10 8E ?? ?? ?? ?? 41 0F 2E C9 7A ?? 75 ?? EB ?? 44 38 B6 ?? ?? ?? ?? 75 ?? F3 0F 10 86 ?? ?? ?? ?? 41 0F 2E C1 7A ?? 75 ?? 48 8B 05 ?? ?? ?? ?? F3 0F 10 80 ?? ?? ?? ?? 41 0F 2E C1 7A ?? 75 ?? 44 39 76 ?? 75 ?? 48 8B CE E8 ?? ?? ?? ??',
+     fields = {zoom_group = {'rip', {3, 115}, {7, 119}}, zoom_players = {'u32', {19}}, zoom_target = {'u32', {29, 73, 100}}, zoom_progress = {'u32', {37, 65}}, move_toward = {'call', {57}, {61}}, page = {'u8', {138}}, zoom_synced = {'u32', {123}}, zoom_leader = {'u32', {90}}, to_loadout = {'call', {145}, {149}}}},
     {name = 'fader', rva = 0x11d66c0, optional = true, text = '48 83 EC 38 48 8B 0D ?? ?? ?? ?? 33 D2 48 81 C1 ?? ?? ?? ?? 48 89 54 24 20 F2 0F 10 44 24 20 0F 28 D1 0F 57 C9 0F 2E D1 8B 81 ?? ?? ?? ?? 89 81 ?? ?? ?? ?? C7 81 ?? ?? ?? ?? 00 00 80 3F C7 81 98 07 00 00 00 00 00 80 F2 0F 11 81 88 07 00 00 89 91 90 07 00 00 F3 0F 11 91 ?? ?? ?? ??',
      fields = {fader = {'rip', {7}, {11}}, fader_offset = {'u32', {16}}, fader_alpha = {'u32', {42}}, fader_start = {'u32', {48}}, fader_target = {'u32', {54}}, fader_duration = {'u32', {90}}}},
     {name = 'names', rva = 0x117e950, optional = true, text = 'FF C9 83 F9 ?? 0F 87 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 8B 8C 8A ?? ?? ?? ?? 48 03 CA FF E1',
@@ -354,18 +361,20 @@ end
 ---------------------------------------------------------------------------------------
 -- Configuration
 
--- Each skip is a Mod Options Menu choice; the value is the index into MODES.
+-- Each skip is a Mod Options Menu choice; the value is the index into its modes (MODES, or QUICK_MODES for the skips
+-- too short for a key press).
 local OPTION_PREFIX = 'alomare.skip_intro_animation.'
 local MODES = {'off', 'key', 'auto'}
+local QUICK_MODES = {'off', 'auto'}
 local MODE_NAMES = {off = 'Off', key = 'Manual', auto = 'Automatic'}
-local DEFAULT_CHOICE = 3
 -- The hellpod entry is not a cutscene scene: it has no scenes, the mod follows the seat instead.
 local FEATURES = {
     {id = 'login', label = 'Log-in ship intro', text = 'login', scenes = {'ship_intro', 'ship_bridge_intro'}},
     {id = 'pod', label = 'Cryo pod transition', text = 'pod', scenes = {'ship_teleporter_arrival'}},
     {id = 'ftl', label = 'FTL transition', text = 'ftl',
      scenes = {'ship_planet_departure', 'ship_planet_arrival', 'ship_teleporter_network_join'}},
-    {id = 'hellpod', label = 'Hellpod to loadout', text = 'hellpod', scenes = {}},
+    {id = 'hellpod', label = 'Hellpod to loadout', text = 'hellpod', scenes = {}, modes = QUICK_MODES},
+    {id = 'zoom', label = 'Drop location zoom', text = 'zoom', scenes = {}, modes = QUICK_MODES},
 }
 local BINDING = 'alomare.skip_intro_animation.skip'
 local MAP_BINDING = 'alomare.skip_intro_animation.map'  -- Mod Bindings Menu key that closes the map, beside Escape
@@ -373,10 +382,21 @@ local MAP_BINDING = 'alomare.skip_intro_animation.map'  -- Mod Bindings Menu key
 -- seat record (64 bytes): +0 seat collection (the hellpod's entity id), moving byte, target node and deadline (offsets
 -- from the code). Then the Hellpod briefing (presenter 14) and its loadout screen (MenuScreenType 11), whose intro
 -- phase 1 waits a timer before the UI is built.
+-- Waits are in seconds of game time (the frame rate doesn't shorten them): seat_timeout for the moved seat to arrive,
+-- briefing_wait for the intro.
 local HELLPOD = {ship_state = 3, briefing = 14, screen_type = 11, intro_waiting = 1, record_size = 0x40,
-                 max_pods = 16, idle_every = 10, ship_every = 30, max_ahead = 30e6, timeout = 180, briefing_wait = 300}
-local TIMEOUT_FRAMES = 1200  -- per scene, for a fast-forward
-local CHAIN_FRAMES = 900     -- how long an ended scene waits for a follow-up one (joining a lobby: 15 12 11 15 13)
+                 max_pods = 16, idle_every = 10, max_ahead = 30e6, seat_timeout = 3, briefing_wait = 5}
+-- Fast-forward waits, in seconds of game time. A timed phase whose timer the game keeps resetting stops after
+-- TIMEOUT; a phase whose timer is over and that waits on loading or other players is followed as long as it lasts.
+-- Drop location zoom: picking a drop location on the map (page 0 of the loadout screen) sets the screen's zoom
+-- target to 1; with players in the drop group, its zoom progress then moves toward it at 1 per second, and the screen
+-- opens the loadout page (1) once both are 1. Without players (a squad client), a screen that doesn't lead waits for
+-- the synced progress instead.
+local ZOOM = {map_page = 0, loadout_page = 1, idle_every = 10}
+local TIMEOUT = 20
+local CHAIN = 30       -- how long an ended scene waits for a follow-up one (joining a lobby: 15 12 11 15 13), and how
+                       -- long after a Manual scene a press made between scenes (a loading screen) still counts
+local PRESS_KEEP = 0.5 -- a press not used at once stays pending this long (a scene seen a frame later)
 
 -- Scene layout: ids around the current one (previous, current, queued); the scene context at manager + 0x60
 -- starts with the phase; the clock and timer stamps come from the code.
@@ -594,6 +614,19 @@ local function hellpod_usable()
     return true, '', found
 end
 
+-- The drop location zoom: usable when the loadout screen, its page and the zoom's target and progress are known.
+local function zoom_usable()
+    for _, name in ipairs({'loadout_page', 'zoom_ramp', 'screen', 'presenters', 'presenter_open'}) do
+        if not code.found[name] then return false, 'code "' .. name .. '" ' .. (code.missing[name] or 'not found') end
+    end
+    for _, k in ipairs({'page', 'zoom_group', 'zoom_players', 'zoom_target', 'zoom_progress', 'zoom_synced',
+                        'zoom_leader', 'ui', 'presenters',
+                        'current_presenter', 'screen_stack', 'screen_slot'}) do
+        if not V[k] then return false, 'value "' .. k .. '" unavailable' end
+    end
+    return true, '', {'map zoom'}
+end
+
 -- Writes the status file from the current modes and, once resolved, what each feature can use.
 local function report()
     if not state.ready then return end  -- still resolving (the map exit is always on); finish_resolution reports
@@ -650,6 +683,9 @@ local function finish_resolution()
         local scenes = {}
         if feature.id == 'hellpod' then
             usable, why, scenes = hellpod_usable()
+            scenes = scenes or {}
+        elseif feature.id == 'zoom' then
+            usable, why, scenes = zoom_usable()
             scenes = scenes or {}
         elseif usable then
             for _, scene in ipairs(feature.scenes) do
@@ -744,8 +780,8 @@ local function warp_step(mgr, current, phase)
     local w = run.warp
     local function stop(why) note('Fast-forward ' .. why); run.warp = nil end
     if current == 0 then
-        w.idle_since = w.idle_since or M.frames
-        if M.frames > w.idle_since + CHAIN_FRAMES then stop('ended') end
+        w.idle_since = w.idle_since or M.time
+        if M.time > w.idle_since + CHAIN then stop('ended') end
         return
     end
     local owner = state.scene_feature[current]
@@ -756,12 +792,11 @@ local function warp_step(mgr, current, phase)
     if current ~= w.scene or phase ~= w.phase then
         if current ~= w.scene then note('Fast-forwarding ' .. owner.name) end
         w.scene, w.phase, w.since = current, phase, M.frames
-        w.deadline = M.frames + TIMEOUT_FRAMES
+        w.deadline = M.time + TIMEOUT
     end
     if FADE_SCENES[owner.name] then hold_fade_clear() end
     local step = plan[phase]
     if not step then return end
-    if M.frames > w.deadline then return stop('timed out (' .. owner.name .. ' phase ' .. phase .. ')') end
     if step.hold_frames and M.frames < w.since + step.hold_frames then return end
     if step.stamp then
         local now = clock_now()
@@ -769,20 +804,25 @@ local function warp_step(mgr, current, phase)
         local stamp = u64(read(address, 8))
         if not now or not stamp then return stop('stopped: timer unreadable') end
         if stamp > now then return stop('stopped: timer ahead of the clock') end
-        if now - stamp < step.wait then
-            if not write(address, ffi.string(ffi.new('uint64_t[1]', now - step.wait), 8)) then
-                return stop('stopped: write failed')
-            end
-            return  -- due now; the game changes phase itself
+        if now - stamp >= step.wait then
+            -- The wait is over: the phase now waits on loading or other players, which is never cut short.
+            w.deadline = M.time + TIMEOUT
+            return
         end
+        if M.time > w.deadline then return stop('timed out (' .. owner.name .. ' phase ' .. phase .. ')') end
+        if not write(address, ffi.string(ffi.new('uint64_t[1]', now - step.wait), 8)) then
+            return stop('stopped: write failed')
+        end
+        -- due now; the game changes phase itself
     end
 end
 
 ---------------------------------------------------------------------------------------
 -- Keys: spacebar for the skips (raw keyboard, plus an optional Mod Bindings Menu binding), Escape for the map
 
+-- pending: until when (game time) an unused skip press still counts.
 local key = {space = nil, space_down = false, menu = nil, menu_down = false, registered = false, wanted = false,
-             escape = nil, escape_down = false, map_registered = false, map_down = false}
+             pending = nil, escape = nil, escape_down = false, map_registered = false, map_down = false}
 
 -- Whether a Stingray keyboard button went down this frame (`field` keeps its id and state in `key`).
 local function keyboard_edge(id_field, down_field)
@@ -795,6 +835,9 @@ local function keyboard_edge(id_field, down_field)
     return edge
 end
 
+-- Whether the skip key went down this frame. Called every frame whatever the modes, so the Mod Bindings Menu binding is
+-- registered every session (the menu only lists registered bindings, and may give an unregistered one's action, with
+-- its key, to another mod).
 local function poll_key()
     local pressed = false
     local keyboard = S and S.Keyboard
@@ -997,9 +1040,9 @@ local function briefing_screen()
     return pointer(read(stack + V.screen_slot, 8))
 end
 
--- idle: watching the local seat (every few frames, on the ship only); armed (Manual): an entry started, waiting for
--- the skip key; seat: moving each step's deadline to now until the seat is reached (the game then opens the
--- briefing itself); briefing: waiting for the briefing's intro wait, then expiring its timer.
+-- idle: watching the local seat (every few frames, on the ship only); seat: moving each step's deadline to now until
+-- the seat is reached (the game then opens the briefing itself); briefing: waiting for the briefing's intro wait,
+-- then expiring its timer.
 local entry = {phase = 'idle', record = nil, resolved = -1e9, collection = nil}
 local hellpod_feature = nil
 
@@ -1008,7 +1051,7 @@ local function entry_stop(why)
     entry.phase = 'idle'
 end
 
-local function hellpod_step(pressed)
+local function hellpod_step()
     local feature = hellpod_feature
     if not (feature and feature.usable) or feature.mode == 'off' then entry.phase = 'idle'; return end
     if entry.phase == 'idle' and M.frames % HELLPOD.idle_every ~= 0 then return end
@@ -1029,33 +1072,18 @@ local function hellpod_step(pressed)
         if previous ~= 0 or not s.collection or s.collection == 0 or not s.moving or not is_hellpod(s.collection) then
             return
         end
-        entry.pod, entry.since = s.collection, M.frames
-        if feature.mode == 'auto' then
-            entry.phase = 'seat'
-            note('Hellpod entry: skip started (automatic)')
-        else
-            entry.phase = 'armed'
-            note('Hellpod entry: started (waiting for the skip key)')
-        end
-        return
-    end
-    if entry.phase == 'armed' then
-        if pressed then
-            entry.phase, entry.since = s.moving and 'seat' or 'briefing', M.frames
-            note('Hellpod entry: skip started (key press)')
-        elseif M.frames > entry.since + HELLPOD.briefing_wait then
-            entry.phase = 'idle'
-        end
+        entry.pod, entry.since, entry.started, entry.phase = s.collection, M.frames, M.time, 'seat'
+        note('Hellpod entry: skip started (automatic)')
         return
     end
     if entry.phase == 'seat' then
         if not s.moving or s.collection ~= entry.pod then
             note(string.format('Hellpod entry: seat reached after %d frames', M.frames - entry.since))
-            entry.phase, entry.since = 'briefing', M.frames
+            entry.phase, entry.since, entry.started = 'briefing', M.frames, M.time
             if not state.hellpod_intro then entry_stop('done (briefing intro skip unavailable)') end
             return
         end
-        if M.frames > entry.since + HELLPOD.timeout then return entry_stop('stopped: the seat was not reached in time') end
+        if M.time > entry.started + HELLPOD.seat_timeout then return entry_stop('stopped: the seat was not reached in time') end
         local now = seat_clock()
         if not now or not s.deadline then return entry_stop('stopped: clock unreadable') end
         if s.deadline > now then
@@ -1076,9 +1104,67 @@ local function hellpod_step(pressed)
             else
                 entry_stop('briefing intro: write failed')
             end
-        elseif M.frames > entry.since + HELLPOD.briefing_wait then
+        elseif M.time > entry.started + HELLPOD.briefing_wait then
             entry_stop('briefing intro not seen')
         end
+    end
+end
+
+---------------------------------------------------------------------------------------
+-- Drop location zoom: the zoom on the map between the pick and the loadout page
+
+-- page: the loadout screen's page last seen; skipped: the frame of the last skip.
+local zoom = {page = nil, skipped = nil}
+local zoom_feature = nil
+
+local function f32(blob)
+    if not blob or #blob ~= 4 then return nil end
+    local v = ffi.new('float[1]')
+    ffi.copy(v, blob, 4)
+    return tonumber(v[0])
+end
+
+-- The value the loadout page waits on while the zoom runs (a pick made, the value short of 1): its address, value
+-- and which branch ('progress' with players in the drop group, 'synced' without), or nil.
+local function zoom_running(screen)
+    local target = f32(read(screen + V.zoom_target, 4))
+    local group = pointer(read(native.base + V.zoom_group, 8))
+    local players = group and u32(read(group + V.zoom_players, 4))
+    local progress = group and f32(read(group + V.zoom_progress, 4))
+    local synced = group and f32(read(group + V.zoom_synced, 4))
+    local leads = read(screen + V.zoom_leader, 1)
+    if target ~= 1 or not players then return nil end
+    if players > 0 then
+        if progress and progress >= 0 and progress < 1 then return group + V.zoom_progress, progress, 'progress' end
+    elseif leads and leads:byte() == 0 and synced and synced >= 0 and synced < 1 then
+        return group + V.zoom_synced, synced, 'synced'
+    end
+end
+
+-- Follows the loadout screen while the Hellpod briefing is open (looked for every few frames otherwise).
+local function zoom_step()
+    local feature = zoom_feature
+    if not (feature and feature.usable) or feature.mode == 'off' then zoom.page = nil; return end
+    if zoom.page == nil and M.frames % ZOOM.idle_every ~= 0 then return end
+    local screen = briefing_screen()
+    local page = screen and u32(read(screen + V.page, 4))
+    if not page then
+        zoom.page = nil
+        return
+    end
+    if page ~= zoom.page and page == ZOOM.loadout_page and zoom.skipped then
+        note(string.format('Drop location zoom: loadout page %d frames after the skip', M.frames - zoom.skipped))
+        zoom.skipped = nil
+    end
+    zoom.page = page
+    if page ~= ZOOM.map_page then return end
+    local address, value, branch = zoom_running(screen)
+    if not address then return end
+    if write(address, ffi.string(ffi.new('float[1]', 1), 4)) then
+        note(string.format('Drop location zoom: ended at %.2f (%s)', value, branch))
+        zoom.skipped = M.frames
+    else
+        note('Drop location zoom: write failed')
     end
 end
 
@@ -1091,12 +1177,15 @@ local function step()
         return
     end
     map_step()
-    if not state.skips_on and not run.warp then return end  -- only the map exit is on: no scene polling
-    local pressed = key.wanted and poll_key()
-    -- The hellpod entry is not a cutscene scene: it follows the local seat (a press that starts it is used up).
-    local armed = entry.phase == 'armed'
-    hellpod_step(pressed)
-    if armed and entry.phase ~= 'armed' and entry.phase ~= 'idle' then pressed = false end
+    local pressed = poll_key()
+    if not state.skips_on and not run.warp then key.pending = nil; return end  -- only the map exit: no scene polling
+    -- A press is kept for a moment, so one made a frame before its scene is seen still counts.
+    if pressed and key.wanted then key.pending = M.time + PRESS_KEEP end
+    if key.pending and M.time > key.pending then key.pending = nil end
+    local press = key.pending ~= nil
+    -- The hellpod entry and the drop location zoom are not cutscene scenes (Off or Automatic only).
+    hellpod_step()
+    zoom_step()
     local mgr = manager()
     if not mgr then return end
     local current, phase = scene_now(mgr)
@@ -1107,15 +1196,27 @@ local function step()
         note('Scene ' .. (current == 0 and 'none' or (state.names[current] or tostring(current))))
     end
     local owner = current ~= 0 and state.scene_feature[current]
-    if owner and not run.warp then
-        local mode = owner.feature.mode
-        local go = (mode == 'auto' and run.auto_done ~= run.since) or (mode == 'key' and pressed)
-        if go then
-            if mode == 'auto' then run.auto_done = run.since end  -- once per scene instance
-            local why = mode == 'auto' and 'automatic' or 'key press'
-            run.warp = {by_key = mode == 'key'}
-            note('Skip started (' .. why .. ')')
+    local mode = owner and owner.feature.mode
+    if mode == 'key' then run.key_scene = M.time end
+    if mode == 'auto' and not run.warp and run.auto_done ~= run.since then
+        run.auto_done = run.since  -- once per scene instance
+        run.warp = {by_key = false}
+        note('Skip started (automatic)')
+    elseif mode == 'key' and press then
+        key.pending = nil
+        if not run.warp then
+            run.warp = {by_key = true}
+            note('Skip started (key press)')
+        elseif not run.warp.by_key then
+            run.warp.by_key = true  -- an automatic chain reaching a Manual scene carries on with the press
+            note('Skip carried on (key press)')
         end
+    elseif current == 0 and press and run.key_scene and M.time <= run.key_scene + CHAIN
+           and not (run.warp and run.warp.by_key) then
+        -- Between two scenes of a chain (a loading screen): the press carries into the next selected scene.
+        key.pending = nil
+        if run.warp then run.warp.by_key = true else run.warp = {by_key = true} end
+        note('Skip started (key press between scenes)')
     end
     if run.warp then warp_step(mgr, current, phase) end
 end
@@ -1152,10 +1253,12 @@ end
 -- Settings: Mod Options Menu, which may load before or after this addon. Without it, each skip takes its default.
 
 for _, feature in ipairs(FEATURES) do
-    feature.default = feature.default or DEFAULT_CHOICE
-    feature.mode = MODES[feature.default]
+    feature.modes = feature.modes or MODES
+    feature.default = feature.default or #feature.modes  -- Automatic
+    feature.mode = feature.modes[feature.default]
     if feature.mode == 'key' then key.wanted = true end
     if feature.id == 'hellpod' then hellpod_feature = feature end
+    if feature.id == 'zoom' then zoom_feature = feature end
 end
 state.skips_on = true  -- the map exit is always on, so native access always starts
 
@@ -1169,7 +1272,7 @@ local function modes_changed()
 end
 
 local function set_mode(feature, value)  -- true if the mode changed
-    local mode = MODES[value] or MODES[feature.default]
+    local mode = feature.modes[value] or feature.modes[feature.default]
     if feature.mode == mode then return false end
     note(feature.label .. ' set to ' .. MODE_NAMES[mode])
     feature.mode = mode
@@ -1183,12 +1286,14 @@ local function connect_menu()
     state.menu = menu
     local mod = host_text(menu, 2, 'option.mod', 40)
     -- OFF is shown in the game's own translation when passed as plain English.
-    local choices = {'Off', host_text(menu, 2, 'option.choice.manual', 48), host_text(menu, 2, 'option.choice.automatic', 48)}
+    local automatic = host_text(menu, 2, 'option.choice.automatic', 48)
+    local choices = {'Off', host_text(menu, 2, 'option.choice.manual', 48), automatic}
+    local quick = {'Off', automatic}
     for _, feature in ipairs(FEATURES) do
         local id = OPTION_PREFIX .. feature.id
         local ok, done, why = pcall(menu.register_option, id, {
             type = 'choice', label = host_text(menu, 2, 'option.' .. feature.text .. '.label', 64), mod = mod,
-            choices = choices, default = feature.default,
+            choices = feature.modes == QUICK_MODES and quick or choices, default = feature.default,
             description = host_text(menu, 2, 'option.' .. feature.text .. '.description', 400)})
         if ok and done then
             pcall(menu.on_change, id, function(value)
@@ -1207,8 +1312,11 @@ end
 ---------------------------------------------------------------------------------------
 -- Frame hook
 
-local function frame()
+local function frame(dt)
     M.frames = M.frames + 1
+    -- Game time: a long frame (a loading hitch) counts at most one second, so waits only get longer.
+    dt = tonumber(dt)
+    if dt and dt > 0 then M.time = M.time + math.min(dt, 1) end
     if not state.menu and connect_menu() then modes_changed() end
     if state.started then
         step()
@@ -1220,7 +1328,7 @@ end
 local original_update = rawget(_G, 'update')
 update = function(dt, ...)
     if not M.retired then
-        local ok, err = xpcall(frame, debug.traceback)
+        local ok, err = xpcall(frame, debug.traceback, dt)
         if not ok then
             M.errors = M.errors + 1
             note('Error: ' .. tostring(err))
@@ -1236,5 +1344,5 @@ end
 
 note('Impatient Diver ' .. M.version .. ' loaded')
 M._test = {state = state, values = V, derived = derived, run = run, code = function() return code end,
-           features = FEATURES}  -- offline tests
+           features = FEATURES, zoom = zoom}  -- offline tests
 return M

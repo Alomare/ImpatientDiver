@@ -83,6 +83,20 @@ SPECS = [
     # 2 s wait before the briefing UI is built).
     {'name': 'briefing_intro', 'start': 0x146909f, 'end': 0x14690ca, 'optional': True,
      'fields': {'intro_phase': (0x27398c, 'u32'), 'intro_timer': (0x273988, 'u32')}},
+    # Drop location zoom: the loadout screen's page (`set_page` 0x1470d90: page at screen + 8, 0 = drop location map,
+    # 1 = loadout) ...
+    {'name': 'loadout_page', 'start': 0x1470db3, 'end': 0x1470de3, 'optional': True,
+     'fields': {'page': (8, 'u8')}},
+    # ... and the zoom after a drop location is picked (the loadout screen's update 0x1468320): the pick sets the
+    # screen's zoom target (+ 0x2739c4) to 1.0; while the drop group ([0x3326aa0] + 0x4ec0) has players, the zoom
+    # (+ 0x4f64) moves toward the target at 1.0 per second (`move_toward` 0x173cb30), and once both are 1.0 on the
+    # map page the screen calls `to_loadout` (0x146f510: set_page(1)). Without players, a screen whose + 0x27fe byte is
+    # clear waits for the group's synced progress (+ 0x55f680, copied from network messages) to be 1.0 instead.
+    {'name': 'zoom_ramp', 'start': 0x14684ef, 'end': 0x1468584, 'optional': True,
+     'fields': {'zoom_group': (0x3326aa0, 'rip'), 'zoom_players': (0x4ec0, 'u32'), 'zoom_target': (0x2739c4, 'u32'),
+                'zoom_progress': (0x4f64, 'u32'), 'move_toward': (0x173cb30, 'call'), 'page': (8, 'u8'),
+                'zoom_synced': (0x55f680, 'u32'), 'zoom_leader': (0x27fe, 'u32'),
+                'to_loadout': (0x146f510, 'call')}},
     # The screen fade setter: the fader global, + 0x128, then duration/alpha/start/target.
     {'name': 'fader', 'start': 0x11d66c0, 'end': 0x11d671e, 'optional': True,
      'fields': {'fader': (0x347cda8, 'rip'), 'fader_offset': (0x128, 'u32'), 'fader_alpha': (0x794, 'u32'),
