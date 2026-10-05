@@ -1,0 +1,19 @@
+return {
+    mod = 'impatient_diver',
+    language = 'pl',
+    strings = {
+        ['option.mod'] = 'Impatient Diver',
+        ['option.choice.manual'] = 'Ręcznie',
+        ['option.choice.automatic'] = 'Automatycznie',
+        ['option.login.label'] = 'Intro statku po zalogowaniu',
+        ['option.login.description'] = 'Kamera wlatująca do statku i twój Helldiver idący na mostek po zalogowaniu. Ręcznie: naciśnij spację (lub swój klawisz z Mod Bindings Menu) w trakcie sekwencji. Automatycznie: pomijana od razu po rozpoczęciu.',
+        ['option.pod.label'] = 'Przejście kapsuły kriogenicznej',
+        ['option.pod.description'] = 'Twoja kapsuła kriogeniczna wjeżdżająca i twój Helldiver wychodzący z niej, gdy trafiasz na statek. Przejmujesz kontrolę przy wyjściu z kapsuły. Ręcznie: naciśnij spację (lub swój klawisz z Mod Bindings Menu) w trakcie sekwencji. Automatycznie: pomijana od razu po rozpoczęciu.',
+        ['option.ftl.label'] = 'Przejście nadświetlne',
+        ['option.ftl.description'] = 'Skok nadświetlny, gdy statek leci na inną planetę i gdy dołączasz do lobby. Wczytywanie nadal następuje. Ręcznie: naciśnij spację (lub swój klawisz z Mod Bindings Menu) w trakcie sekwencji. Automatycznie: pomijana od razu po rozpoczęciu. Przy dołączaniu do lobby jedno naciśnięcie w trybie Ręcznie pomija też następną kapsułę kriogeniczną, chyba że ma ustawienie Wył.',
+        ['option.hellpod.label'] = 'Od Hellpoda do ekwipunku',
+        ['option.hellpod.description'] = 'Eksperymentalne. Twój Helldiver wchodzący do Hellpoda i kamera przechodząca do ekranu strefy zrzutu. Ten ekran, ekwipunek i start pozostają bez zmian. Ręcznie: naciśnij spację (lub swój klawisz z Mod Bindings Menu) w trakcie sekwencji. Automatycznie: pomijana od razu po rozpoczęciu.',
+        ['binding.skip'] = 'Pomiń przerywnik',
+        ['binding.map'] = 'Zamknij mapę galaktyki',
+    },
+}

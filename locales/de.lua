@@ -1,0 +1,19 @@
+return {
+    mod = 'impatient_diver',
+    language = 'de',
+    strings = {
+        ['option.mod'] = 'Impatient Diver',
+        ['option.choice.manual'] = 'Manuell',
+        ['option.choice.automatic'] = 'Automatisch',
+        ['option.login.label'] = 'Schiffsintro beim Einloggen',
+        ['option.login.description'] = 'Die Kamera, die ins Schiff fliegt, und dein Helldiver, der nach dem Einloggen zur Brücke geht. Manuell: Drücke die Leertaste (oder deine Taste aus Mod Bindings Menu), während sie läuft. Automatisch: wird übersprungen, sobald sie beginnt.',
+        ['option.pod.label'] = 'Kryokapsel-Übergang',
+        ['option.pod.description'] = 'Deine Kryokapsel, die hereinrollt, und dein Helldiver, der aussteigt, wenn du auf einem Schiff ankommst. Du übernimmst am Kapselausgang. Manuell: Drücke die Leertaste (oder deine Taste aus Mod Bindings Menu), während sie läuft. Automatisch: wird übersprungen, sobald sie beginnt.',
+        ['option.ftl.label'] = 'FTL-Übergang',
+        ['option.ftl.description'] = 'Der FTL-Sprung, wenn das Schiff zu einem anderen Planeten reist und wenn du einer Lobby beitrittst. Geladen wird trotzdem. Manuell: Drücke die Leertaste (oder deine Taste aus Mod Bindings Menu), während sie läuft. Automatisch: wird übersprungen, sobald sie beginnt. Beim Lobby-Beitritt überspringt ein manueller Druck auch die Kryokapsel danach, außer sie steht auf Aus.',
+        ['option.hellpod.label'] = 'Hellpod bis zur Ausrüstung',
+        ['option.hellpod.description'] = 'Experimentell. Dein Helldiver, der in den Hellpod steigt, und die Kamera, die zum Bildschirm der Abwurfzone fährt. Abwurfzone, Ausrüstung und Start bleiben unverändert. Manuell: Drücke die Leertaste (oder deine Taste aus Mod Bindings Menu), während sie läuft. Automatisch: wird übersprungen, sobald sie beginnt.',
+        ['binding.skip'] = 'Zwischensequenz überspringen',
+        ['binding.map'] = 'Galaxiekarte schließen',
+    },
+}

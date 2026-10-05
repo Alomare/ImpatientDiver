@@ -1,0 +1,19 @@
+return {
+    mod = 'impatient_diver',
+    language = 'it',
+    strings = {
+        ['option.mod'] = 'Impatient Diver',
+        ['option.choice.manual'] = 'Manuale',
+        ['option.choice.automatic'] = 'Automatico',
+        ['option.login.label'] = 'Intro della nave all\'accesso',
+        ['option.login.description'] = 'La telecamera che entra nella nave e il tuo Helldiver che cammina fino al ponte dopo l\'accesso. Manuale: premi la barra spaziatrice (o il tuo tasto di Mod Bindings Menu) durante la sequenza. Automatico: saltata appena inizia.',
+        ['option.pod.label'] = 'Transizione capsula criogenica',
+        ['option.pod.description'] = 'La tua capsula criogenica che arriva e il tuo Helldiver che ne esce quando arrivi su una nave. Prendi il controllo all\'uscita della capsula. Manuale: premi la barra spaziatrice (o il tuo tasto di Mod Bindings Menu) durante la sequenza. Automatico: saltata appena inizia.',
+        ['option.ftl.label'] = 'Transizione iperluce',
+        ['option.ftl.description'] = 'Il salto iperluce quando la nave viaggia verso un altro pianeta e quando entri in una lobby. Il caricamento avviene comunque. Manuale: premi la barra spaziatrice (o il tuo tasto di Mod Bindings Menu) durante la sequenza. Automatico: saltata appena inizia. Entrando in una lobby, una pressione in Manuale salta anche la capsula criogenica successiva, a meno che non sia su Spento.',
+        ['option.hellpod.label'] = 'Dall\'Hellpod all\'equipaggiamento',
+        ['option.hellpod.description'] = 'Sperimentale. Il tuo Helldiver che sale nell\'Hellpod e la telecamera che passa alla schermata della zona di inserimento. Quella schermata, la dotazione e il lancio non cambiano. Manuale: premi la barra spaziatrice (o il tuo tasto di Mod Bindings Menu) durante la sequenza. Automatico: saltata appena inizia.',
+        ['binding.skip'] = 'Salta filmato',
+        ['binding.map'] = 'Chiudi mappa galattica',
+    },
+}

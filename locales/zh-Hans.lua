@@ -1,0 +1,19 @@
+return {
+    mod = 'impatient_diver',
+    language = 'zh-Hans',
+    strings = {
+        ['option.mod'] = 'Impatient Diver',
+        ['option.choice.manual'] = '手动',
+        ['option.choice.automatic'] = '自动',
+        ['option.login.label'] = '登录时的舰船开场',
+        ['option.login.description'] = '登录后镜头飞入舰船、你的绝地潜兵走到舰桥的场景。手动：播放时按空格键（或你在 Mod Bindings Menu 中设置的按键）。自动：一开始就跳过。',
+        ['option.pod.label'] = '冷冻舱过场',
+        ['option.pod.description'] = '抵达舰船时冷冻舱推入、你的绝地潜兵走出的场景。你会在冷冻舱出口获得控制权。手动：播放时按空格键（或你在 Mod Bindings Menu 中设置的按键）。自动：一开始就跳过。',
+        ['option.ftl.label'] = '超光速过场',
+        ['option.ftl.description'] = '舰船前往其他星球以及加入大厅时的超光速跃迁。仍会正常加载。手动：播放时按空格键（或你在 Mod Bindings Menu 中设置的按键）。自动：一开始就跳过。加入大厅时，在手动模式下按一次也会跳过随后的冷冻舱（除非其设为关）。',
+        ['option.hellpod.label'] = '从绝地喷射舱到装备界面',
+        ['option.hellpod.description'] = '实验性功能。你的绝地潜兵爬进绝地喷射舱、镜头移向空投地点界面的场景。空投地点界面、武装配置和发射不受影响。手动：播放时按空格键（或你在 Mod Bindings Menu 中设置的按键）。自动：一开始就跳过。',
+        ['binding.skip'] = '跳过过场动画',
+        ['binding.map'] = '关闭星系地图',
+    },
+}
