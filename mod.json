@@ -3,7 +3,7 @@
     "guid": "86bc5845-f890-4685-9d46-9c213ff36ba8",
     "displayName": "Impatient Diver",
     "entry": "skip_intro_animation.lua",
-    "version": "4",
+    "version": "5",
     "icon": "icon.png",
     "description": "Allows skipping some gameplay transitions automatically or with a key press. Configurable with Mod Options Menu.",
     "requires": [

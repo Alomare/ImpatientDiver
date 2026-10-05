@@ -1,0 +1,19 @@
+return {
+    mod = 'impatient_diver',
+    language = 'pt',
+    strings = {
+        ['option.mod'] = 'Impatient Diver',
+        ['option.choice.manual'] = 'Manual',
+        ['option.choice.automatic'] = 'Automático',
+        ['option.login.label'] = 'Introdução da nave ao entrar',
+        ['option.login.description'] = 'A câmara a voar para dentro da nave e o teu Helldiver a caminhar até à ponte depois de entrares no jogo. Manual: carrega na barra de espaços (ou na tua tecla do Mod Bindings Menu) durante a sequência. Automático: ignorada assim que começa.',
+        ['option.pod.label'] = 'Transição da cápsula criogénica',
+        ['option.pod.description'] = 'A tua cápsula criogénica a chegar e o teu Helldiver a sair dela quando chegas a uma nave. Assumes o controlo à saída da cápsula. Manual: carrega na barra de espaços (ou na tua tecla do Mod Bindings Menu) durante a sequência. Automático: ignorada assim que começa.',
+        ['option.ftl.label'] = 'Transição UL',
+        ['option.ftl.description'] = 'O salto UL quando a nave viaja para outro planeta e quando entras numa sala. O carregamento continua a acontecer. Manual: carrega na barra de espaços (ou na tua tecla do Mod Bindings Menu) durante a sequência. Automático: ignorada assim que começa. Ao entrar numa sala, um toque no modo Manual também ignora a cápsula criogénica a seguir, a menos que esteja Desligada.',
+        ['option.hellpod.label'] = 'Da cápsula Hell ao equipamento',
+        ['option.hellpod.description'] = 'Experimental. O teu Helldiver a entrar na cápsula Hell e a câmara a passar para o ecrã da zona de aterragem. Esse ecrã, o equipamento e o lançamento não mudam. Manual: carrega na barra de espaços (ou na tua tecla do Mod Bindings Menu) durante a sequência. Automático: ignorada assim que começa.',
+        ['binding.skip'] = 'Saltar cena',
+        ['binding.map'] = 'Fechar mapa galáctico',
+    },
+}

@@ -1,0 +1,19 @@
+return {
+    mod = 'impatient_diver',
+    language = 'zh-Hant',
+    strings = {
+        ['option.mod'] = 'Impatient Diver',
+        ['option.choice.manual'] = '手動',
+        ['option.choice.automatic'] = '自動',
+        ['option.login.label'] = '登入時的太空船開場',
+        ['option.login.description'] = '登入後鏡頭飛入太空船、你的絕地戰兵走到艦橋的場景。手動：播放時按空白鍵（或你在 Mod Bindings Menu 中設定的按鍵）。自動：一開始就跳過。',
+        ['option.pod.label'] = '冷凍艙過場',
+        ['option.pod.description'] = '抵達太空船時冷凍艙推入、你的絕地戰兵走出的場景。你會在冷凍艙出口取得控制權。手動：播放時按空白鍵（或你在 Mod Bindings Menu 中設定的按鍵）。自動：一開始就跳過。',
+        ['option.ftl.label'] = '超光速過場',
+        ['option.ftl.description'] = '太空船前往其他星球以及加入大廳時的超光速跳躍。仍會正常載入。手動：播放時按空白鍵（或你在 Mod Bindings Menu 中設定的按鍵）。自動：一開始就跳過。加入大廳時，在手動模式下按一次也會跳過之後的冷凍艙（除非其設為關）。',
+        ['option.hellpod.label'] = '從絕地噴射艙到裝備畫面',
+        ['option.hellpod.description'] = '實驗性功能。你的絕地戰兵爬進絕地噴射艙、鏡頭移向空投地點畫面的場景。空投地點畫面、武裝配置和發射不受影響。手動：播放時按空白鍵（或你在 Mod Bindings Menu 中設定的按鍵）。自動：一開始就跳過。',
+        ['binding.skip'] = '跳過過場動畫',
+        ['binding.map'] = '關閉銀河地圖',
+    },
+}
