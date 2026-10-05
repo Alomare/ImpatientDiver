@@ -20,7 +20,9 @@ return {
         ['option.ftl.label'] = 'FTL Transition',
         ['option.ftl.description'] = 'The FTL jump when the ship travels to another planet and when you join a lobby. Loading still happens. Manual: press spacebar (or your Mod Bindings Menu key) while it plays. Automatic: skipped as soon as it starts. When joining a lobby, one Manual press also skips the cryo pod after it, unless that is Off.',
         ['option.hellpod.label'] = 'Hellpod to Loadout',
-        ['option.hellpod.description'] = 'Experimental. Your Helldiver climbing into the hellpod and the camera moving to the drop location screen. The drop location screen, the loadout and the launch are untouched. Manual: press spacebar (or your Mod Bindings Menu key) while it plays. Automatic: skipped as soon as it starts.',
+        ['option.hellpod.description'] = 'Your Helldiver climbing into the hellpod and the camera moving to the drop location screen. The drop location screen, the loadout and the launch are untouched. Automatic: skipped as soon as it starts.',
+        ['option.zoom.label'] = 'Drop Location Zoom',
+        ['option.zoom.description'] = 'The quick camera zoom on the map when you pick a drop location, before the loadout appears. Automatic: skipped as soon as it starts.',
         -- The key names in Mod Bindings Menu: the skip key, and a key that closes the galactic map at once (Escape
         -- always does).
         ['binding.skip'] = 'Skip cutscene',
@@ -31,5 +33,6 @@ return {
               ['option.login.label'] = 64, ['option.login.description'] = 400, ['option.pod.label'] = 64,
               ['option.pod.description'] = 400, ['option.ftl.label'] = 64, ['option.ftl.description'] = 400,
               ['option.hellpod.label'] = 64, ['option.hellpod.description'] = 400,
+              ['option.zoom.label'] = 64, ['option.zoom.description'] = 400,
               ['binding.skip'] = 64, ['binding.map'] = 64},
 }
