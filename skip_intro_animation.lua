@@ -20,7 +20,7 @@
 -- Loading waits are never skipped. (Version 1 ended the log-in intro through the game's interrupt, whose
 -- abort path left cinematic state behind that crashed the next hellpod launch.)
 --
--- Ship Walk Speed Boost (On or Off): aboard the ship, the local Helldiver's movement speeds are tripled, up to the
+-- Ship Walk Speed Boost (On or Off, Off by default): aboard the ship, the local Helldiver's movement speeds are tripled, up to the
 -- game's own 10 m/s limit. The ship's Helldiver reads them from a private copy of its movement record (made at spawn
 -- from the ship's own settings), which the mod changes; mission Helldivers, other players' and the shared record are
 -- never touched, and the speeds are put back when the Helldiver leaves the ship or the option is turned off.
@@ -412,7 +412,7 @@ local FEATURES = {
      scenes = {'ship_planet_departure', 'ship_planet_arrival', 'ship_teleporter_network_join'}},
     {id = 'hellpod', label = 'Hellpod to loadout', text = 'hellpod', scenes = {}, modes = QUICK_MODES},
     {id = 'zoom', label = 'Drop location zoom', text = 'zoom', scenes = {}, modes = QUICK_MODES},
-    {id = 'shipspeed', label = 'Ship walk speed boost', text = 'shipspeed', scenes = {}, modes = SWITCH_MODES,
+    {id = 'shipspeed', label = 'Ship walk speed boost', text = 'shipspeed', scenes = {}, modes = SWITCH_MODES, default = 1,
      normal = 'the ship speed is normal'},
 }
 local BINDING = 'alomare.skip_intro_animation.skip'
@@ -779,7 +779,7 @@ local function report()
     table.insert(lines, 1, verdict)
     table.insert(lines, 2, 'Impatient Diver ' .. M.version)
     table.insert(lines, 3, state.menu and 'Settings: Mod Options Menu (escape menu > MODS > Impatient Diver)'
-                           or 'Settings: defaults, every feature on (Mod Options Menu not found)')
+                           or 'Settings: defaults, every skip on, speed boost off (Mod Options Menu not found)')
     if code and #code.moved > 0 then
         lines[#lines + 1] = 'Signatures were searched for (game updated since build 25480438).'
     end

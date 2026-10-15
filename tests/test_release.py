@@ -536,11 +536,11 @@ def main():
           and all(opts[i].default == 3 and list(opts[i].choices.values()) == ['Off', 'Manual', 'Automatic']
                   for i in every if i not in quick + switch)
           and all(opts[i].default == 2 and list(opts[i].choices.values()) == ['Off', 'Automatic'] for i in quick)
-          and all(opts[i].default == 2 and list(opts[i].choices.values()) == ['Off', 'On'] for i in switch)
+          and all(opts[i].default == 1 and list(opts[i].choices.values()) == ['Off', 'On'] for i in switch)
           and [opts['alomare.skip_intro_animation.' + k].label for k in FEATURE_IDS]
           == ['Intro Cinematics', 'Log-in Ship Intro', 'Cryo Pod Transition', 'FTL Transition', 'Hellpod to Loadout',
               'Drop Location Zoom', 'Ship Walk Speed Boost'],
-          'three Off/Manual/Automatic options, three Off/Automatic ones and an Off/On one (no map toggle), all on by '
+          'three Off/Manual/Automatic options, three Off/Automatic ones and an Off/On one (no map toggle), the skips on and the boost off by '
           'default, in the order they happen')
     check(f.map_bound == 'alomare.skip_intro_animation.map|Close galactic map',
           'the map key is a Mod Bindings Menu binding: %r' % f.map_bound)
@@ -576,13 +576,13 @@ def main():
     f = fake(lua)
     f.frame_step(1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 8 feature(s) active') and 'Settings: defaults, every feature on' in status
+    check(status.startswith('OK - 7 feature(s) active') and 'Settings: defaults, every skip on, speed boost off' in status
           and status.count(': Automatic (') == 6 and 'Drop location zoom: Automatic (map zoom)' in status and ': Manual (' not in status
           and 'Hellpod to loadout: Automatic (seat transition, briefing intro)' in status
           and 'Intro cinematics: Automatic (title screen no-intro start)' in status
-          and 'Ship walk speed boost: On (ship movement record, capped at 10 m/s)' in status
+          and 'Ship walk speed boost: Off' in status
           and 'Galactic map quick exit: On (Ctrl or the Mod Bindings Menu key' in status,
-          'without Mod Options Menu: every skip Automatic, the speed boost and the map exit on: %r' % (status,))
+          'without Mod Options Menu: every skip Automatic, the speed boost off, the map exit on: %r' % (status,))
     f.frame_step(1)
     check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene',
           'the skip binding is registered with every skip Automatic: %r' % f.bound)
@@ -613,7 +613,7 @@ def main():
     f = fake(lua)
     f.frame_step(1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 8 feature(s) active') and 'not registered: full' in text(logs / 'ImpatientDiver.log'),
+    check(status.startswith('OK - 7 feature(s) active') and 'not registered: full' in text(logs / 'ImpatientDiver.log'),
           'no value from the menu, or a failed registration, keeps the defaults: %r' % (status,))
 
     # 1e. Mod Options Menu v1.1 (version 2): texts are functions in the game's language (English here); OFF stays the

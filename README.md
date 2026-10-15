@@ -13,7 +13,7 @@ A Helldivers 2 Lua mod for [Bingus Shared Loader](https://github.com/CowboyBingu
 - **Hellpod to Loadout:** your Helldiver climbing into the hellpod and the camera moving to the drop location screen. The drop location, the loadout and the launch are untouched.
 - **Drop Location Zoom:** the quick zoom on the map after you pick a drop location; the loadout appears right away.
 - The three cutscenes are each **Off**, **Manual** (spacebar, or a Mod Bindings Menu key) or **Automatic** (the default); Intro Cinematics, Hellpod to Loadout and Drop Location Zoom are **Off** or **Automatic** (the default).
-- **Ship Walk Speed Boost:** your Helldiver moves three times as fast aboard the ship (walking, jogging, sprinting, crouched), up to the game's own 10 m/s speed limit. Missions are untouched. **On** (the default) or **Off**.
+- **Ship Walk Speed Boost:** your Helldiver moves three times as fast aboard the ship (walking, jogging, sprinting, crouched), up to the game's own 10 m/s speed limit. Missions are untouched. **Off** (the default) or **On**.
 - **Galactic Map Quick Exit:** Ctrl closes the galactic map at once from any level (mission, operation, planet or sector). Escape still backs out one level per press, as in the game. Ctrl and the key are ignored while you type in the chat. Always on; a "Close galactic map" key can also be set in Mod Bindings Menu (for example a gamepad button).
 - Settings in [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) (escape menu > MODS > Impatient Diver), applied at once. Without it every feature is on.
 - Texts follow the game's Text Language.
