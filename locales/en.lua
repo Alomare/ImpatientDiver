@@ -23,7 +23,13 @@ return {
         ['option.hellpod.description'] = 'Your Helldiver climbing into the hellpod and the camera moving to the drop location screen. The drop location screen, the loadout and the launch are untouched. Automatic: skipped as soon as it starts.',
         ['option.zoom.label'] = 'Drop Location Zoom',
         ['option.zoom.description'] = 'The quick camera zoom on the map when you pick a drop location, before the loadout appears. Automatic: skipped as soon as it starts.',
-        -- The key names in Mod Bindings Menu: the skip key, and a key that closes the galactic map at once (Escape
+        -- The title screen's intro videos (the Super Earth announcement, then the recruitment video).
+        ['option.intro.label'] = 'Intro Cinematics',
+        ['option.intro.description'] = 'The Super Earth announcement and the recruitment video when the game starts. Automatic: they never load or play. Takes effect at the next game start.',
+        -- Not a skip: Off or On (the game's own words). The game caps every movement speed at 10 m/s.
+        ['option.shipspeed.label'] = 'Ship Walk Speed Boost',
+        ['option.shipspeed.description'] = 'Your Helldiver moves three times as fast aboard the ship, up to the game\'s own speed limit. Missions are untouched.',
+        -- The key names in Mod Bindings Menu: the skip key, and a key that closes the galactic map at once (Ctrl
         -- always does).
         ['binding.skip'] = 'Skip cutscene',
         ['binding.map'] = 'Close galactic map',
@@ -34,5 +40,7 @@ return {
               ['option.pod.description'] = 400, ['option.ftl.label'] = 64, ['option.ftl.description'] = 400,
               ['option.hellpod.label'] = 64, ['option.hellpod.description'] = 400,
               ['option.zoom.label'] = 64, ['option.zoom.description'] = 400,
+              ['option.intro.label'] = 64, ['option.intro.description'] = 400,
+              ['option.shipspeed.label'] = 64, ['option.shipspeed.description'] = 400,
               ['binding.skip'] = 64, ['binding.map'] = 64},
 }

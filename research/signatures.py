@@ -118,6 +118,59 @@ SPECS = [
     # [collection + 0x98] + 0x10.
     {'name': 'hologram_request', 'start': 0x14bdcbb, 'end': 0x14bdcde, 'optional': True,
      'fields': {'holo_slot': (0x98, 'u32'), 'close_flag': (0x10, 'u8')}},
+    # The map keys are ignored while the chat's text input is open (Better Chat's signatures, live-proven by its
+    # paste): the chat notice (0x12f2f60) finds the HUD chat widget inside the HUD (hud + chat_hud) ...
+    {'name': 'chat_notice', 'start': 0x12f2f81, 'end': 0x12f3027, 'optional': True,
+     'fields': {'hud': (0x346d538, 'rip'), 'hud_active': (0x24e335, 'u32'), 'chat_hud': (0x14498, 'u32')}},
+    # ... and a chat widget function (0x18608d0) starts by testing whether its text input is open.
+    {'name': 'chat_input', 'start': 0x18608d0, 'end': 0x18608f0, 'optional': True,
+     'fields': {'chat_open': (0x139b8, 'u32')}},
+    # Ship walk speed boost. Every avatar reader gets its AvatarComponentData record from this resolver (0x508db0): an
+    # avatar spawned with an entity delta has a private copy of the whole record, which it reads instead of the type
+    # record. The ship's Helldiver always has one (the ship's delta sets walk 1.5 and jog 4.08); mission Helldivers
+    # normally don't. The avatar manager [0x3326d20] maps entity ids to copy indices (buckets +0x547c70, capacity
+    # +0x547c78, empty key +0x547c7c, multiplier +0x547c80); the copies (0x354 bytes) are inline from +0x547d24.
+    # The record size stays literal: the HealthComponentData resolver (0x506580) has the same code with 0x43c.
+    {'name': 'avatar_copy', 'start': 0x508db0, 'end': 0x508e84, 'optional': True,
+     'fields': {'avatars': (0x3326d20, 'rip'), 'copy_map': (0x547c70, 'u32'), 'copy_capacity': (0x547c78, 'u32'),
+                'copy_empty': (0x547c7c, 'u32'), 'copy_multiplier': (0x547c80, 'u32'), 'copies': (0x547d24, 'u32')}},
+    # The movement update (0xa6c700) calls that resolver and keeps the record in rbp ...
+    {'name': 'speed_record', 'start': 0xa6ca4e, 'end': 0xa6ca69, 'optional': True,
+     'fields': {'speed_resolver': (0x508db0, 'call')}},
+    # ... and picks the target speed from it: crouched (state bit 77) sprint +0x28, jog +0x24, aim +0x1c, walk +0x20 ...
+    {'name': 'speeds_crouch', 'start': 0xa6cc91, 'end': 0xa6ccdf, 'optional': True,
+     'fields': {'speed_crouch_sprint': (0x28, 'u8'), 'speed_crouch_jog': (0x24, 'u8'),
+                'speed_crouch_aim': (0x1c, 'u8'), 'speed_crouch_walk': (0x20, 'u8')}},
+    # ... prone +0x2c; standing sprint +0x14 (at empty stamina +0x18) and jog +0x10 ...
+    {'name': 'speeds_stand', 'start': 0xa6cd29, 'end': 0xa6cd9a, 'optional': True,
+     'fields': {'speed_prone': (0x2c, 'u8'), 'speed_sprint_exhausted': (0x18, 'u8'), 'speed_sprint': (0x14, 'u8'),
+                'speed_jog': (0x10, 'u8')}},
+    # ... aiming +8, walking +0xc (both times the direction factor) ...
+    {'name': 'speeds_walk', 'start': 0xa6cdde, 'end': 0xa6cdf7, 'optional': True,
+     'fields': {'speed_aim': (0x8, 'u8'), 'speed_walk': (0xc, 'u8')}},
+    # ... and caps the result: movss xmm6, [10.0]; minss xmm6, xmm7 (the game's limit, 10 m/s).
+    {'name': 'speed_cap', 'start': 0xa6d0bf, 'end': 0xa6d100, 'optional': True,
+     'fields': {'speed_cap': (0x23c7554, 'rip')}},
+    # Intro cinematics. StateTitleScreen's on_enter (0xad5950) sets the title's no-intro byte (+0x10) when the game
+    # object's flag (+0x106f; no other code reads it) or its transition argument (a return to the title) is set; with
+    # it set and no message pending, on_enter also starts at once (0xad6a90, as a key press on the title screen) ...
+    {'name': 'title_enter', 'start': 0xad59f7, 'end': 0xad5a1d, 'optional': True,
+     'fields': {'intro_flag': (0x106f, 'u32'), 'title_no_intro': (0x10, 'u8')}},
+    # ... and registers the title object (type 0xb8) in the game's state list (count +0x2590, 16-byte entries
+    # {object, type} from +0x2598) ...
+    {'name': 'title_register', 'start': 0xad5c71, 'end': 0xad5ca1, 'optional': True,
+     'fields': {'states': (0x3326e68, 'rip'), 'title_type': (0xb8, 'u32'), 'title_count': (0x2590, 'u32'),
+                'title_entries': (0x2598, 'u32')}},
+    # ... its update (0xad7cb0) runs the setup (0xad5cf0) once its packages are loaded, then sets +0x144 ...
+    {'name': 'title_update', 'start': 0xad7ce8, 'end': 0xad7d8d, 'optional': True,
+     'fields': {'title_set_up': (0x144, 'u32'), 'title_setup': (0xad5cf0, 'call')}},
+    # ... the setup builds the intro video player (+0x81a8) only while the no-intro byte is clear, then sets +0x145 ...
+    {'name': 'title_setup', 'start': 0xad645f, 'end': 0xad64fa, 'optional': True,
+     'fields': {'title_no_intro': (0x10, 'u8'), 'title_player': (0x81a8, 'u32'), 'title_has_player': (0x145, 'u32')}},
+    # ... and the update queues the two intro videos (0x2b1a74c2, the announcement and trailer, then 0xde13da08) only
+    # with a player, not queued yet (+0x146) and the byte clear.
+    {'name': 'title_queue', 'start': 0xad7f9b, 'end': 0xad7fe4, 'optional': True,
+     'fields': {'title_has_player': (0x145, 'u32'), 'title_queued': (0x146, 'u32'), 'title_no_intro': (0x10, 'u8')}},
 ]
 
 

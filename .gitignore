@@ -9,3 +9,5 @@ research/fix_dump.py
 research/flag_refs.py
 research/recon*.lua
 research/test_recon*.py
+# Live test checklists (local only)
+TESTING.md

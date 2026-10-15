@@ -78,9 +78,11 @@ fake.read = read_mem
 fake.write = write_mem
 fake.reads = 0
 
+-- The Windows functions, by their export names (fake.no_game: game.dll isn't loaded).
 local k32 = {
     GetCurrentProcess = function() return nil end,
-    GetModuleHandleA = function(name) return ffi.cast('void *', BASE) end,
+    GetCurrentProcessId = function() return 1234 end,
+    GetModuleHandleA = function(name) if fake.no_game then return nil end return ffi.cast('void *', BASE) end,
     ReadProcessMemory = function(p, addr, buf, size, got)
         fake.reads = fake.reads + 1
         local s = read_mem(tonumber(ffi.cast('uint64_t', addr)), tonumber(size))
@@ -93,11 +95,44 @@ local k32 = {
         got[0] = size; return 1
     end,
 }
-package.loaded.ffi = setmetatable({load = function(name) return k32 end}, {__index = real_ffi})
+-- The libraries as FFI sees them (as One Click Armor Set's harness): a call goes through the C declaration of the name
+-- it is made by (the shared namespace keeps the first one; a later ffi.cdef of the name fails), so its arguments are
+-- converted, or refused, as in the game. The stand-ins are called back through that declaration (JIT off: a callback
+-- can't run under a compiled C call).
+require('jit').off()
+local declared, callbacks = {}, {}
+local function cdef(text)
+    real_ffi.cdef(text)
+    local ret, name, params, rest = text:match('^%s*([^;(]-)%s*([%w_]+)%s*(%b())%s*([^;]*);%s*$')
+    if name and not declared[name] then
+        declared[name] = {type = ret .. '(*)' .. params, symbol = rest:match('__asm__%("([%w_]+)"%)') or name}
+    end
+end
+local library = setmetatable({}, {__index = function(_, name)
+    local d = assert(declared[name], 'missing declaration for symbol ' .. name)
+    callbacks[name] = callbacks[name] or real_ffi.cast(d.type, assert(k32[d.symbol], 'no stand-in for ' .. d.symbol))
+    return callbacks[name]
+end})
+package.loaded.ffi = setmetatable({load = function() return library end, cdef = cdef}, {__index = real_ffi})
+-- Another mod loaded first declared the Windows functions under their own names, with other types (a player's log,
+-- 2026-10-10, One Click Armor Set): a call through these names would be converted, or refused, by their types.
+for _, decl in ipairs({'uintptr_t GetCurrentProcess(void);', 'uintptr_t GetModuleHandleA(const char *name);',
+                       'int ReadProcessMemory(uintptr_t process, uintptr_t address, uintptr_t buffer, size_t size, '
+                           .. 'size_t *read);',
+                       'int WriteProcessMemory(uintptr_t process, uintptr_t address, const char *buffer, size_t size, '
+                           .. 'size_t *written);',
+                       'uint64_t GetCurrentProcessId(void);', 'int GetAsyncKeyState(uintptr_t key);'}) do
+    cdef(decl)
+end
 
+-- The engine keyboard: spacebar 44, left Ctrl 29, right Ctrl 157 (Escape 27 too, which the mod must not use).
+local KEY_IDS = {space = 44, ['left ctrl'] = 29, ['right ctrl'] = 157, esc = 27, escape = 27}
 stingray = {
-    Keyboard = {button_id = function(n) return (n == 'space' and 44) or (n == 'esc' and 27) or nil end,
-                pressed = function(id) return (id == 44 and fake.space) or (id == 27 and fake.escape) end},
+    Keyboard = {button_id = function(n) return KEY_IDS[n] end,
+                pressed = function(id)
+                    return (id == 44 and fake.space) or (id == 29 and fake.ctrl) or (id == 157 and fake.rctrl)
+                           or (id == 27 and fake.escape) or false
+                end},
 }
 -- Mod Options Menu v1.0.1's API, validating specs by its rules (mod_options_menu.lua new_option).
 fake.values, fake.options, fake.callbacks = {}, {}, {}
@@ -157,6 +192,10 @@ fake.heap(UI + 0x4280, string.rep('\0', 0x200))
 fake.heap(HOLO, string.rep('\0', 0x18))
 write_mem(UI + 0x4288 + 0xd8 + 0x98, le64(HOLO))
 function fake.set_presenter(id) write_mem(UI + 0x4288 + 0xc, le32(id)) end
+-- The HUD [0x346d538]: its chat widget at +0x14498, whose byte +0x139b8 is set while the chat's text input is open.
+HUD = 0x33000000
+fake.patch(0x346d538, le64(HUD)); fake.heap(HUD + 0x14498 + 0x139b0, string.rep('\0', 0x10))
+function fake.chat(open) write_mem(HUD + 0x14498 + 0x139b8, open and '\1' or '\0') end
 function fake.close_request() return read_mem(HOLO + 0x10, 1):byte() end
 function fake.clear_request() write_mem(HOLO + 0x10, '\0') end
 -- MissionEnd (13) and MissionSummary (23): their close requests at [collection + 0x88] / [collection + 0xd8]; the
@@ -352,6 +391,60 @@ function fake.loadout_update(dt)
     end
 end
 
+-- Ship walk speed boost: the avatar manager [0x3326d20] maps entity ids to private record copies (buckets +0x547c70,
+-- capacity +0x547c78, empty key +0x547c7c, multiplier +0x547c80); 0x354-byte copies inline from +0x547d24. A copy is
+-- made at spawn, here with the ship's values (the ship's delta: walk 1.5, jog 4.08; the rest as the shared record).
+AVM, COPYMAP = 0x30000000, 0x30100000
+fake.patch(0x3326d20, le64(AVM))
+fake.heap(AVM + 0x547c70, string.rep('\0', 0x20)); fake.heap(COPYMAP, string.rep('\0', 8 * 8))
+write_mem(AVM + 0x547c70, le64(COPYMAP) .. le32(8) .. le32(0xffffffff) .. le32(MULT))
+for i = 0, 7 do write_mem(COPYMAP + i * 8, le32(0xffffffff) .. le32(0)) end
+fake.heap(AVM + 0x547d24, string.rep('\0', 0x354 * 4))
+fake.AVATAR, fake.OTHER = AVATAR, 0xa1a1
+fake.SHIP = {[4] = 0.75, [8] = 2.0, [0xc] = 1.5, [0x10] = 4.08, [0x14] = 5.5, [0x18] = 4.25, [0x1c] = 1.2, [0x20] = 1.5,
+             [0x24] = 2.25, [0x28] = 4.0, [0x2c] = 1.5, [0x30] = 1.5, [0x34] = 23}
+function fake.spawn_copy(entity, index)
+    local s = slot_of(entity, 8)
+    while u32_at(COPYMAP + s * 8) ~= 0xffffffff and u32_at(COPYMAP + s * 8) ~= entity do s = (s + 1) % 8 end
+    write_mem(COPYMAP + s * 8, le32(entity) .. le32(index))
+    for off, v in pairs(fake.SHIP) do write_mem(AVM + 0x547d24 + index * 0x354 + off, f32(v)) end
+end
+function fake.speed(index, off) return f32_at(AVM + 0x547d24 + index * 0x354 + off) end
+
+-- Intro cinematics: the game's state list [0x3326e68] (count +0x2590, {object, type} entries from +0x2598) and the
+-- title object. on_enter (0xad5950) stores the game object at +0 and its no-intro flag (+0x106f, or a return to the
+-- title) as +0x10, and with it set starts at once; the update (0xad7cb0) runs the setup once the packages are loaded
+-- (+0x144), which builds the video player only without the byte (+0x145), then queues the videos (+0x146) with a
+-- player and without the byte.
+STATES, TITLE = 0x31000000, 0x32000000
+fake.patch(0x3326e68, le64(STATES)); fake.heap(STATES + 0x2580, string.rep('\0', 0x100))
+fake.heap(TITLE, string.rep('\0', 0x200)); fake.heap(GAME + 0x1060, string.rep('\0', 0x20))
+function fake.title_enter(back)
+    write_mem(TITLE, le64(GAME))
+    local skip = read_mem(GAME + 0x106f, 1):byte() ~= 0 or back
+    write_mem(TITLE + 0x10, skip and '\1' or '\0'); write_mem(TITLE + 0x144, '\0\0\0')
+    write_mem(STATES + 0x2598, le64(0x7000) .. le32(0xb7) .. le32(0) .. le64(TITLE) .. le32(0xb8) .. le32(0))
+    write_mem(STATES + 0x2590, le32(2))
+    fake.title_frames = 0
+    if skip then fake.calls[#fake.calls + 1] = 'title start' end
+end
+function fake.title_exit() write_mem(STATES + 0x2590, le32(0)) end
+function fake.title_byte(o) return read_mem(TITLE + o, 1):byte() end
+function fake.flag() return read_mem(GAME + 0x106f, 1):byte() end
+function fake.title_update()
+    if u32_at(STATES + 0x2590) == 0 then return end
+    fake.title_frames = fake.title_frames + 1
+    local b = fake.title_byte
+    if b(0x144) == 0 then
+        if fake.title_frames < (fake.load_frames or 120) then return end  -- its packages loading
+        if b(0x10) == 0 then write_mem(TITLE + 0x145, '\1'); fake.calls[#fake.calls + 1] = 'video player' end
+        write_mem(TITLE + 0x144, '\1')
+    end
+    if b(0x145) ~= 0 and b(0x146) == 0 and b(0x10) == 0 then
+        write_mem(TITLE + 0x146, '\1'); fake.calls[#fake.calls + 1] = 'intro videos'
+    end
+end
+
 function fake.frame_step(n)
     for _ = 1, n or 1 do
         fake.frame = fake.frame + 1
@@ -361,6 +454,7 @@ function fake.frame_step(n)
         fake.game_update()
         fake.seat_update()
         fake.loadout_update(dt)
+        fake.title_update()
     end
 end
 function fake.calls_text() local s = table.concat(fake.calls, ';'); fake.calls = {}; return s end
@@ -375,20 +469,23 @@ def check(cond, what):
 
 
 CHOICE = {'off': 1, 'key': 2, 'auto': 3}
-QUICK = ('hellpod', 'zoom')  # Off / Automatic only
+QUICK = ('intro', 'hellpod', 'zoom')  # Off / Automatic only
 QUICK_CHOICE = {'off': 1, 'auto': 2}
+SWITCH = ('shipspeed',)  # Off / On
+SWITCH_CHOICE = {'off': 1, 'on': 2}
+FEATURE_IDS = ('intro', 'login', 'pod', 'ftl', 'hellpod', 'zoom', 'shipspeed')
 
 
 def new_game(settings, image, prepare='', menu=True):
-    """settings: '<feature>_<off|key|auto>' names set in Mod Options Menu; unnamed features are Off.
+    """settings: '<feature>_<off|key|auto|on>' names set in Mod Options Menu; unnamed features are Off.
     menu=False: Mod Options Menu is not installed."""
     logdir = tempfile.mkdtemp(prefix='sia_rel_')
     lua = LuaRuntime(unpack_returned_tuples=True)
     lua.execute(HARNESS, logdir, image)
-    values = {'login': 1, 'pod': 1, 'ftl': 1, 'hellpod': 1, 'zoom': 1}
+    values = {k: 1 for k in FEATURE_IDS}
     for name in settings:
         feature, mode = name.split('_')
-        values[feature] = (QUICK_CHOICE if feature in QUICK else CHOICE)[mode]
+        values[feature] = (QUICK_CHOICE if feature in QUICK else SWITCH_CHOICE if feature in SWITCH else CHOICE)[mode]
     for feature, value in values.items():
         lua.execute(f"fake.values['{feature}'] = {value}")
     if not menu:
@@ -431,16 +528,20 @@ def main():
           'every skip Off: the map exit alone, update chained: %r' % (status.splitlines()[:1],))
     opts = f.options
     ids = sorted(opts.keys()) if opts else []
-    skips = ['alomare.skip_intro_animation.' + k for k in ('ftl', 'login', 'pod', 'hellpod', 'zoom')]
+    every = ['alomare.skip_intro_animation.' + k for k in FEATURE_IDS]
     quick = ['alomare.skip_intro_animation.' + k for k in QUICK]
-    check(ids == sorted(skips)
-          and all(opts[i].mod == 'Impatient Diver' and opts[i].type == 'choice' for i in skips)
+    switch = ['alomare.skip_intro_animation.' + k for k in SWITCH]
+    check(ids == sorted(every)
+          and all(opts[i].mod == 'Impatient Diver' and opts[i].type == 'choice' for i in every)
           and all(opts[i].default == 3 and list(opts[i].choices.values()) == ['Off', 'Manual', 'Automatic']
-                  for i in skips if i not in quick)
+                  for i in every if i not in quick + switch)
           and all(opts[i].default == 2 and list(opts[i].choices.values()) == ['Off', 'Automatic'] for i in quick)
-          and [opts['alomare.skip_intro_animation.' + k].label for k in ('login', 'pod', 'ftl', 'hellpod', 'zoom')]
-          == ['Log-in Ship Intro', 'Cryo Pod Transition', 'FTL Transition', 'Hellpod to Loadout', 'Drop Location Zoom'],
-          'three Off/Manual/Automatic options and two Off/Automatic ones (no map toggle), Automatic by default')
+          and all(opts[i].default == 2 and list(opts[i].choices.values()) == ['Off', 'On'] for i in switch)
+          and [opts['alomare.skip_intro_animation.' + k].label for k in FEATURE_IDS]
+          == ['Intro Cinematics', 'Log-in Ship Intro', 'Cryo Pod Transition', 'FTL Transition', 'Hellpod to Loadout',
+              'Drop Location Zoom', 'Ship Walk Speed Boost'],
+          'three Off/Manual/Automatic options, three Off/Automatic ones and an Off/On one (no map toggle), all on by '
+          'default, in the order they happen')
     check(f.map_bound == 'alomare.skip_intro_animation.map|Close galactic map',
           'the map key is a Mod Bindings Menu binding: %r' % f.map_bound)
     check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene',
@@ -475,11 +576,13 @@ def main():
     f = fake(lua)
     f.frame_step(1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 6 feature(s) active') and 'Settings: defaults, every feature on' in status
-          and status.count(': Automatic (') == 5 and 'Drop location zoom: Automatic (map zoom)' in status and ': Manual (' not in status
+    check(status.startswith('OK - 8 feature(s) active') and 'Settings: defaults, every feature on' in status
+          and status.count(': Automatic (') == 6 and 'Drop location zoom: Automatic (map zoom)' in status and ': Manual (' not in status
           and 'Hellpod to loadout: Automatic (seat transition, briefing intro)' in status
-          and 'Galactic map quick exit: On' in status,
-          'without Mod Options Menu: every skip Automatic, the map exit on: %r' % (status,))
+          and 'Intro cinematics: Automatic (title screen no-intro start)' in status
+          and 'Ship walk speed boost: On (ship movement record, capped at 10 m/s)' in status
+          and 'Galactic map quick exit: On (Ctrl or the Mod Bindings Menu key' in status,
+          'without Mod Options Menu: every skip Automatic, the speed boost and the map exit on: %r' % (status,))
     f.frame_step(1)
     check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene',
           'the skip binding is registered with every skip Automatic: %r' % f.bound)
@@ -510,7 +613,7 @@ def main():
     f = fake(lua)
     f.frame_step(1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 6 feature(s) active') and 'not registered: full' in text(logs / 'ImpatientDiver.log'),
+    check(status.startswith('OK - 8 feature(s) active') and 'not registered: full' in text(logs / 'ImpatientDiver.log'),
           'no value from the menu, or a failed registration, keeps the defaults: %r' % (status,))
 
     # 1e. Mod Options Menu v1.1 (version 2): texts are functions in the game's language (English here); OFF stays the
@@ -547,8 +650,9 @@ def main():
     check(ids and ids['ship_intro'] == 7 and ids['ship_bridge_intro'] == 3 and ids['ship_teleporter_arrival'] == 13
           and ids['ship_planet_departure'] == 12 and ids['ship_planet_arrival'] == 11
           and ids['ship_teleporter_network_join'] == 15, 'scene ids read from the game\'s name table')
-    check(status.splitlines()[:6] == ['OK - 4 feature(s) active', 'Impatient Diver ' + version,
+    check(status.splitlines()[:7] == ['OK - 4 feature(s) active', 'Impatient Diver ' + version,
                                       'Settings: Mod Options Menu (escape menu > MODS > Impatient Diver)',
+                                      'Intro cinematics: Off',
                                       'Log-in ship intro: Automatic (ship_intro, ship_bridge_intro)',
                                       'Cryo pod transition: Manual (ship_teleporter_arrival)',
                                       'FTL transition: Automatic (ship_planet_departure, ship_planet_arrival, ship_teleporter_network_join)'],
@@ -814,39 +918,75 @@ def main():
     check(early == '' and late_by_a_frame == 'update 11 2->3',
           'a press 2 s before a scene is not kept %r; one a frame before is %r' % (early, late_by_a_frame))
 
-    # 6. Galactic Map Quick Exit (always on): Escape or the Mod Bindings Menu key on the map sets the Hologram
-    #    presenter's close request (the game's presenter manager then closes it); nothing elsewhere.
+    # 6. Galactic Map Quick Exit (always on): Ctrl (left or right) or the Mod Bindings Menu key on the map sets the
+    #    Hologram presenter's close request (the game's presenter manager then closes it); nothing elsewhere. Escape
+    #    is left to the game (one level back per press).
     lua, logs = new_game([], image)
     f = fake(lua)
     f.frame_step(1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 1 feature(s) active') and 'Galactic map quick exit: On' in status,
+    check(status.startswith('OK - 1 feature(s) active') and 'Galactic map quick exit: On (Ctrl' in status,
           'map exit on: status says so: %r' % (status.splitlines()[:1],))
     reads = f.reads
     f.frame_step(100)
     check((f.reads - reads) / 100 <= 0.3, 'map closed: %.2f reads per frame' % ((f.reads - reads) / 100))
     f.set_presenter(15)
     f.frame_step(11)
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
-    check(f.close_request() == 1 and 'close requested' in text(logs / 'ImpatientDiver.log'),
-          'Escape on the galactic map: close request set')
+    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(3)
+    check(f.close_request() == 0 and 'close requested' not in text(logs / 'ImpatientDiver.log'),
+          'Escape on the galactic map: left to the game')
+    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
+    log = text(logs / 'ImpatientDiver.log')
+    check(f.close_request() == 1 and 'Ctrl on the galactic map: close requested' in log
+          and 'Map key: engine buttons "left ctrl", "right ctrl"' in log,
+          'left Ctrl on the galactic map: close request set')
     f.clear_request()
     f.frame_step(5)
     check(f.close_request() == 0, 'one request per press')
+    f.rctrl = True; f.frame_step(1); f.rctrl = False; f.frame_step(1)
+    check(f.close_request() == 1, 'right Ctrl too')
+    f.clear_request()
     f.set_presenter(0)
     f.frame_step(11)
-    f.escape = True
+    f.ctrl = True
     f.set_presenter(15)
     f.frame_step(12)
-    f.escape = False; f.frame_step(1)
-    check(f.close_request() == 0, 'an Escape held while the map opens does not close it')
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
+    f.ctrl = False; f.frame_step(1)
+    check(f.close_request() == 0, 'a Ctrl held while the map opens does not close it')
+    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
     check(f.close_request() == 1, 'the next press does')
     f.clear_request()
     f.set_presenter(3)
     f.frame_step(11)
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(11)
-    check(f.close_request() == 0, 'Escape in another menu: nothing written')
+    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(11)
+    check(f.close_request() == 0, 'Ctrl in another menu: nothing written')
+    # Typing in the chat on the map: Ctrl (Ctrl+V) and the map key are ignored while its text input is open.
+    f.set_presenter(15); f.frame_step(11)
+    f.chat(True)
+    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
+    f.map_key = True; f.frame_step(1); f.map_key = False; f.frame_step(1)
+    typed = f.close_request()
+    f.chat(False)
+    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
+    log = text(logs / 'ImpatientDiver.log')
+    check(typed == 0 and f.close_request() == 1 and 'Ctrl on the galactic map ignored: the chat is open' in log
+          and 'Map binding on the galactic map ignored: the chat is open' in log
+          and 'not while typing in the chat' in text(logs / 'ImpatientDiver_STATUS.log'),
+          'chat open on the map: Ctrl and the map key ignored; chat closed: Ctrl closes the map')
+    f.clear_request(); f.set_presenter(3); f.frame_step(11)
+    rva, code = sig_bytes(image, 'chat_input')
+    lua, logs = new_game([], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
+    f = fake(lua)
+    f.frame_step(40)
+    f.set_presenter(15); f.frame_step(11)
+    f.chat(True); f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
+    status = text(logs / 'ImpatientDiver_STATUS.log')
+    check(f.close_request() == 1 and status.startswith('OK - 1 feature(s) active')
+          and 'the chat check is not available, so typing in the chat counts too' in status,
+          'chat code missing: the map exit still works, without the chat check')
+    lua, logs = new_game([], image)
+    f = fake(lua)
+    f.frame_step(1)
     f.map_key = True; f.frame_step(1); f.map_key = False; f.frame_step(11)
     check(f.close_request() == 0, 'the map key in another menu: nothing written')
     f.set_presenter(15)
@@ -864,7 +1004,7 @@ def main():
     f.frame_step(40)
     f.set_presenter(15)
     f.frame_step(11)
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
+    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
     check(f.close_request() == 0 and status.startswith('PARTIAL - 1 selected feature(s)')
           and 'Galactic map quick exit: NOT AVAILABLE, the map works as normal (code "hologram_request" not found)' in status,
@@ -1024,10 +1164,230 @@ def main():
           and 'MissionEnd' not in text(logs / 'ImpatientDiver.log'),
           'scenes after a mission are left alone: %r %r' % (calls, stamps))
 
+    # 10. Intro cinematics (Automatic). Before the title screen: the game's no-intro flag is set, so the title screen
+    #     starts without the videos (and goes on at once, as on a return to the title); the flag is put back once
+    #     the title screen has started.
+    lua, logs = new_game(['intro_auto'], image)
+    f = fake(lua)
+    f.frame_step(3)
+    v = lua.globals().ImpatientDiver._test['values']
+    check(v.intro_flag == 0x106f and v.title_no_intro == 0x10 and v.states == 0x3326e68 and v.title_type == 0xb8
+          and v.title_count == 0x2590 and v.title_entries == 0x2598 and v.title_set_up == 0x144
+          and v.title_has_player == 0x145 and v.title_queued == 0x146 and v.title_setup == 0xad5cf0,
+          'intro offsets read from the code')
+    flag_before = f.flag()
+    f.title_enter()
+    f.frame_step(200)
+    log = text(logs / 'ImpatientDiver.log')
+    check(flag_before == 1 and f.calls_text() == 'title start' and f.flag() == 0
+          and f.title_byte(0x145) == 0 and f.title_byte(0x146) == 0
+          and 'Intro cinematics: no-intro flag set before the title screen' in log
+          and 'the title screen started without them, from the no-intro flag' in log and 'another game object' not in log
+          and "no-intro flag put back (the title screen has started)" in log,
+          'intro: the flag set before the title screen, no video player, flag put back: %r'
+          % ([l for l in log.splitlines() if 'Intro' in l],))
+    # Back to the title later without the game's own skip: the byte is set on the title screen.
+    f.title_exit(); f.frame_step(20)
+    f.title_enter(); f.frame_step(200)
+    again = f.calls_text()
+    f.title_exit(); f.frame_step(20)
+    f.title_enter(True); f.frame_step(200)
+    back = f.calls_text()
+    log = text(logs / 'ImpatientDiver.log')
+    check(again == '' and back == 'title start' and f.flag() == 0 and 'Intro cinematics: title screen closed' in log
+          and log.count('no-intro set on the title screen') == 1 and 'started without them, on its own' in log,
+          'a later title screen: no videos either %r; a return to the title is left to the game %r' % (again, back))
+
+    # 10b. The title screen already up when the mod starts (its start missed the flag): the byte is set before the
+    #      setup, so no video player is built and nothing is queued; the flag is never touched.
+    lua, logs = new_game(['intro_auto'], image, 'fake.title_enter()')
+    f = fake(lua)
+    f.frame_step(200)
+    log = text(logs / 'ImpatientDiver.log')
+    check(f.calls_text() == '' and f.title_byte(0x10) == 1 and f.title_byte(0x145) == 0 and f.flag() == 0
+          and 'no-intro set on the title screen' in log and 'another game object' not in log,
+          'intro: set on a title screen already up, before its setup: %r' % ([l for l in log.splitlines() if 'Intro' in l],))
+
+    # 10c. Too late (the videos already queued): nothing written.
+    lua, logs = new_game(['intro_auto'], image, 'fake.title_enter(); fake.load_frames = 0')
+    f = fake(lua)
+    f.frame_step(30)
+    log = text(logs / 'ImpatientDiver.log')
+    check(f.calls_text() == 'video player;intro videos' and f.title_byte(0x10) == 0 and f.flag() == 0
+          and 'too late, the videos were already queued' in log, 'intro: too late, nothing written')
+
+    # 10d. Off: the videos play; switched Off after the flag was set (before the title screen): the flag is put back.
+    lua, logs = new_game([], image)
+    f = fake(lua)
+    f.frame_step(3)
+    f.title_enter(); f.frame_step(200)
+    check(f.calls_text() == 'video player;intro videos' and f.flag() == 0 and f.title_byte(0x10) == 0,
+          'intro Off: the videos play')
+    lua, logs = new_game(['intro_auto'], image)
+    f = fake(lua)
+    f.frame_step(3)
+    set_first = f.flag()
+    f.apply('intro', 1); f.frame_step(2)
+    f.title_enter(); f.frame_step(200)
+    check(set_first == 1 and f.flag() == 0 and f.calls_text() == 'video player;intro videos'
+          and 'no-intro flag put back (switched off)' in text(logs / 'ImpatientDiver.log'),
+          'intro switched Off before the title screen: flag put back, the videos play')
+
+    # 10e. The game's flag already set (by the game itself): left alone, never cleared.
+    lua, logs = new_game(['intro_auto'], image, "fake.write(0x2500106f, '\\1')")
+    f = fake(lua)
+    f.frame_step(3)
+    f.title_enter(); f.frame_step(30)
+    check(f.calls_text() == 'title start' and f.flag() == 1
+          and "the game's no-intro flag is already set (1); left alone" in text(logs / 'ImpatientDiver.log'),
+          'intro: a flag the game set itself is left alone')
+
+    # 10e'. The mod starting on the ship (no title screen to come): the flag is never set; set, and the game reaching the
+    #       ship without a title screen: put back.
+    lua, logs = new_game(['intro_auto'], image, 'fake.set_game_state(3)')
+    f = fake(lua)
+    f.frame_step(30)
+    on_ship = (f.flag(), 'no title screen before game state 3; nothing to do' in text(logs / 'ImpatientDiver.log'))
+    lua, logs = new_game(['intro_auto'], image)
+    f = fake(lua)
+    f.frame_step(3)
+    set_first = f.flag()
+    f.set_game_state(3); f.frame_step(3)
+    check(on_ship == (0, True) and set_first == 1 and f.flag() == 0
+          and 'flag put back (the game went on without a title screen)' in text(logs / 'ImpatientDiver.log'),
+          'intro: never set on the ship %r; put back if the game gets there without a title screen' % (on_ship,))
+
+    # 10f. Mod Options Menu loading after this addon: the intro waits for its setting (Off here); without the menu
+    #      the default (Automatic) applies after the wait.
+    lua, logs = new_game(['intro_off'], image, menu=False)
+    f = fake(lua)
+    f.frame_step(30)
+    waited = f.flag()
+    lua.execute('ModOptionsMenu = fake.option_menu')
+    f.frame_step(100)
+    later_off = f.flag()
+    lua, logs = new_game([], image, menu=False)
+    f = fake(lua)
+    f.frame_step(30)
+    early = f.flag()
+    f.frame_step(40)
+    check(waited == 0 and later_off == 0 and early == 0 and f.flag() == 1,
+          'intro: waits for a menu that loads later (%d %d); without it, Automatic after the wait (%d %d)'
+          % (waited, later_off, early, f.flag()))
+
+    # 10g. Code missing or moved: the intro plays and nothing is written.
+    rva, code = sig_bytes(image, 'title_setup')
+    lua, logs = new_game(['intro_auto'], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
+    f = fake(lua)
+    f.frame_step(40)
+    f.title_enter(); f.frame_step(200)
+    status = text(logs / 'ImpatientDiver_STATUS.log')
+    check('Intro cinematics: NOT AVAILABLE, plays normally (code "title_setup" not found)' in status
+          and f.flag() == 0 and f.calls_text() == 'video player;intro videos', 'intro code missing: the videos play')
+    rel = (0xad7000 - (0xad7d81 + 5)).to_bytes(4, 'little', signed=True)
+    lua, logs = new_game(['intro_auto'], image, "fake.patch(%d, '%s')" % (0xad7d82, lua_bytes(rel)))
+    f = fake(lua)
+    f.frame_step(40)
+    check('Intro cinematics: NOT AVAILABLE, plays normally (the title setup moved)'
+          in text(logs / 'ImpatientDiver_STATUS.log') and f.flag() == 0,
+          'intro: the update calling another setup turns it off')
+
+    # 11. Ship walk speed boost (On): on the ship the local Helldiver's private movement record gets every speed
+    #     tripled, up to the game's cap (10 m/s); the direction factor, swimming, stamina and other Helldivers' records
+    #     are untouched; put back when switched off or off the ship; never in a mission.
+    lua, logs = new_game(['shipspeed_on'], image)
+    f = fake(lua)
+    f.frame_step(1)
+    reads = f.reads
+    f.frame_step(150)
+    off_ship = (f.reads - reads) / 150  # the scene polling, and the game state every few frames
+    v = lua.globals().ImpatientDiver._test['values']
+    check(v.avatars == 0x3326d20 and v.copy_map == 0x547c70 and v.copies == 0x547d24 and v.speed_walk == 0xc
+          and v.speed_jog == 0x10 and v.speed_sprint == 0x14 and v.speed_crouch_sprint == 0x28 and v.speed_prone == 0x2c
+          and v.speed_aim == 8 and v.speed_resolver == 0x508db0 and v.speed_cap == 0x23c7554,
+          'speed boost offsets read from the code')
+    BOOSTED = {0x8: 6.0, 0xc: 4.5, 0x10: 10.0, 0x14: 10.0, 0x18: 10.0, 0x1c: 3.6, 0x20: 4.5, 0x24: 6.75, 0x28: 10.0,
+               0x2c: 4.5, 0x4: 0.75, 0x30: 1.5, 0x34: 23.0}
+    SHIP = {k: v for k, v in f.SHIP.items()}
+
+    def speeds(index, expected):
+        return all(abs(f.speed(index, off) - value) < 1e-4 for off, value in expected.items())
+    f.set_game_state(3)
+    f.spawn_copy(f.OTHER, 0); f.spawn_copy(f.AVATAR, 1)
+    f.frame_step(30)
+    log = text(logs / 'ImpatientDiver.log')
+    check(speeds(1, BOOSTED) and speeds(0, SHIP)
+          and 'Ship walk speed boost: on, entity %d (walk 1.50 -> 4.50, jog 4.08 -> 10.00, sprint 5.50 -> 10.00 m/s; '
+              'cap 10)' % f.AVATAR in log,
+          'speed boost: the local record tripled up to the cap, the other one untouched: %r'
+          % ([round(f.speed(1, o), 2) for o in sorted(BOOSTED)],))
+    reads = f.reads
+    f.frame_step(150)
+    log = text(logs / 'ImpatientDiver.log')
+    boosted_cost = (f.reads - reads) / 150 - off_ship
+    check(log.count('Ship walk speed boost: on,') == 1 and boosted_cost < 0.3,
+          'kept without writing again: %.2f reads per frame for the boost' % boosted_cost)
+    f.spawn_copy(f.AVATAR, 1)  # the game makes the record again (a respawn on board)
+    f.frame_step(30)
+    check(speeds(1, BOOSTED) and text(logs / 'ImpatientDiver.log').count('Ship walk speed boost: on,') == 2,
+          'a record made again is boosted again (never compounded)')
+    f.apply('shipspeed', 1); f.frame_step(30)
+    off = speeds(1, SHIP)
+    f.apply('shipspeed', 2); f.frame_step(30)
+    on_again = speeds(1, BOOSTED)
+    f.set_game_state(4); f.frame_step(30)
+    left = speeds(1, SHIP)
+    f.spawn_copy(f.AVATAR, 2)  # a mission Helldiver with a private record
+    f.frame_step(60)
+    log = text(logs / 'ImpatientDiver.log')
+    check(off and on_again and left and speeds(2, SHIP) and speeds(0, SHIP)
+          and 'speeds put back (switched off)' in log and 'speeds put back (left the ship)' in log,
+          'speeds put back when switched off (%r) and off the ship (%r); a mission record untouched' % (off, left))
+
+    # 11a. The game makes the record again with other values, and the option is switched off before the next look:
+    #      that record is the game's, so nothing is put back into it.
+    lua, logs = new_game(['shipspeed_on'], image)
+    f = fake(lua)
+    f.frame_step(1)
+    f.set_game_state(3); f.spawn_copy(f.AVATAR, 1); f.frame_step(30)
+    boosted = speeds(1, BOOSTED)
+    f.SHIP[0xc] = 1.75; f.spawn_copy(f.AVATAR, 1)
+    f.apply('shipspeed', 1); f.frame_step(30)
+    check(boosted and abs(f.speed(1, 0xc) - 1.75) < 1e-4 and abs(f.speed(1, 0x10) - 4.08) < 1e-4
+          and 'speeds put back' not in text(logs / 'ImpatientDiver.log'),
+          'a record the game made again is never overwritten when switched off: walk %.2f' % f.speed(1, 0xc))
+
+    # 11b. No private record for the local Helldiver: nothing written anywhere; the speed code missing, or the movement
+    #      update reading another record: unavailable.
+    lua, logs = new_game(['shipspeed_on'], image)
+    f = fake(lua)
+    f.frame_step(1)
+    f.set_game_state(3); f.spawn_copy(f.OTHER, 0)
+    f.frame_step(60)
+    check(speeds(0, SHIP) and 'the local Helldiver has no ship movement record yet' in text(logs / 'ImpatientDiver.log'),
+          'speed boost: no record of its own, nothing written')
+    rva, code = sig_bytes(image, 'speed_cap')
+    lua, logs = new_game(['shipspeed_on'], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
+    f = fake(lua)
+    f.frame_step(40)
+    f.set_game_state(3); f.spawn_copy(f.AVATAR, 1); f.frame_step(60)
+    check(speeds(1, SHIP) and 'Ship walk speed boost: NOT AVAILABLE, the ship speed is normal (code "speed_cap" not found)'
+          in text(logs / 'ImpatientDiver_STATUS.log'), 'speed code missing: the speed is normal')
+    rel = (0x506580 - (0xa6ca4e + 5)).to_bytes(4, 'little', signed=True)
+    lua, logs = new_game(['shipspeed_on'], image, "fake.patch(%d, '%s')" % (0xa6ca4f, lua_bytes(rel)))
+    f = fake(lua)
+    f.frame_step(40)
+    check('Ship walk speed boost: NOT AVAILABLE, the ship speed is normal (the movement update reads another record)'
+          in text(logs / 'ImpatientDiver_STATUS.log'), 'the movement update must call the record resolver found')
+
+    # 12. The Windows functions are declared under the mod's own names (another mod's declarations of the bare names,
+    #     made first in this harness with other types, would otherwise take over every call).
+    check(not re.search(r"\b(GetCurrentProcess|GetCurrentProcessId|GetModuleHandleA|ReadProcessMemory|WriteProcessMemory"
+                        r"|GetAsyncKeyState|GetForegroundWindow|GetWindowThreadProcessId)\(", MAIN),
+          "Windows functions under the mod's own names (imd_...)")
+
     # 7. Not the game (no game.dll): nothing happens.
-    lua, logs = new_game(['ftl_auto'], image, "package.loaded.ffi = setmetatable({load = function() return {"
-                         "GetCurrentProcess = function() end, GetModuleHandleA = function() return nil end} end},"
-                         " {__index = require('ffi')})")
+    lua, logs = new_game(['ftl_auto'], image, 'fake.no_game = true')
     f = fake(lua)
     f.frame_step(3)
     check(text(logs / 'ImpatientDiver_STATUS.log').startswith('NOT AVAILABLE - game.dll not loaded'),

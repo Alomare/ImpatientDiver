@@ -2,8 +2,10 @@
 -- Impatient Diver by Alomare.
 --
 -- Skips ship sequences. Each is set in Mod Options Menu (escape menu > MODS) to Off, Manual (spacebar, plus an
--- optional Mod Bindings Menu binding) or Automatic (the two quick ones, hellpod and zoom, only Off or Automatic);
+-- optional Mod Bindings Menu binding) or Automatic (the quick ones, intro, hellpod and zoom, only Off or Automatic);
 -- without that mod each is Automatic:
+--   Intro cinematics     the Super Earth announcement and the recruitment video before the title screen: the title
+--                        screen's own no-intro start (as on a return to the title), so they are never loaded
 --   Log-in ship intro    ship_intro, then ship_bridge_intro
 --   Cryo pod transition  ship_teleporter_arrival (the game itself places the Helldiver at the pod exit)
 --   FTL transition       ship_planet_departure, ship_planet_arrival and ship_teleporter_network_join
@@ -18,9 +20,15 @@
 -- Loading waits are never skipped. (Version 1 ended the log-in intro through the game's interrupt, whose
 -- abort path left cinematic state behind that crashed the next hellpod launch.)
 --
--- Galactic Map Quick Exit (always on): Escape, or the Mod Bindings Menu key "Close galactic map", on the galactic map
+-- Ship Walk Speed Boost (On or Off): aboard the ship, the local Helldiver's movement speeds are tripled, up to the
+-- game's own 10 m/s limit. The ship's Helldiver reads them from a private copy of its movement record (made at spawn
+-- from the ship's own settings), which the mod changes; mission Helldivers, other players' and the shared record are
+-- never touched, and the speeds are put back when the Helldiver leaves the ship or the option is turned off.
+--
+-- Galactic Map Quick Exit (always on): Ctrl, or the Mod Bindings Menu key "Close galactic map", on the galactic map
 -- sets the map presenter's own close request, so the game's presenter manager closes it (and pops its screen) that
--- frame, from any zoom level.
+-- frame, from any zoom level. Escape backs out one level, as in the game. While the chat's text input is open, the
+-- keys are ignored (Ctrl+V pastes with Better Chat; a letter may be bound to the map key).
 --
 -- Everything native is found in game.dll by code signatures (first at this build's addresses, else by a search
 -- of its executable sections spread over frames, where a signature must match exactly once), timer waits and
@@ -33,7 +41,7 @@ if rawget(_G, 'ImpatientDiver') then return end
 
 local ffi = require('ffi')
 
-local M = {version = '6', frames = 0, time = 0, errors = 0}
+local M = {version = '7', frames = 0, time = 0, errors = 0}
 rawset(_G, 'ImpatientDiver', M)
 
 local S = rawget(_G, 'stingray')
@@ -106,6 +114,32 @@ local SIGS = {
      fields = {collection = {'u32', {5}}, check = {'call', {10}, {14}}, close = {'call', {22}, {26}}}},
     {name = 'hologram_request', rva = 0x14bdcbb, optional = true, text = '48 8B 81 90 00 00 00 0F B6 40 ?? C3 48 8B 81 ?? ?? ?? ?? 0F B6 40 ?? C3 48 8B 81 A0 00 00 00 0F B6 00 C3',
      fields = {holo_slot = {'u32', {15}}, close_flag = {'u8', {10, 22}}}},
+    {name = 'chat_notice', rva = 0x12f2f81, optional = true, text = '48 8B 3D ?? ?? ?? ?? 49 8B F0 48 8B DA 80 BF ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? 4C 8B 1D ?? ?? ?? ?? 33 C0 49 39 1B 74 ?? FF C0 49 81 C3 C0 00 00 00 83 F8 08 72 ?? E9 ?? ?? ?? ?? 0F 1F 40 00 0F 29 74 24 70 48 8D 54 24 50 0F 28 35 ?? ?? ?? ?? 4C 8B C3 E8 ?? ?? ?? ?? 4D 8D 4B 08 48 89 74 24 28 48 8D 8F 80 70 4F 00 66 0F 7F 74 24 40 4C 8D 44 24 40 BA 7F 03 12 1C 0F 10 00 48 8D 44 24 30 48 89 44 24 20 0F 29 44 24 30 E8 ?? ?? ?? ?? F3 0F 10 15 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? 48 8B D0 E8 ?? ?? ?? ??',
+     fields = {hud = {'rip', {3}, {7}}, hud_active = {'u32', {15}}, chat_hud = {'u32', {154}}}},
+    {name = 'chat_input', rva = 0x18608d0, optional = true, text = '48 83 EC 28 80 B9 ?? ?? ?? ?? 00 4C 8B C9 74 ?? 84 D2 74 ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 33 D2 49 8B C9',
+     fields = {chat_open = {'u32', {6}}}},
+    {name = 'avatar_copy', rva = 0x508db0, optional = true, text = '48 83 EC 28 4C 8B D1 48 85 C9 75 ?? 33 C0 48 83 C4 28 C3 8B 41 08 3B 05 ?? ?? ?? ?? 0F 84 ?? ?? ?? ?? 4C 8B 1D ?? ?? ?? ?? 45 33 C0 48 89 5C 24 30 48 89 6C 24 38 48 89 74 24 40 45 8B 8B ?? ?? ?? ?? 41 8B 9B ?? ?? ?? ?? 0F AF D8 48 89 7C 24 20 41 8D 69 FF 45 85 C9 74 ?? 49 8B BB ?? ?? ?? ?? 41 8B B3 ?? ?? ?? ?? 0F 1F 84 00 00 00 00 00 8B CD 41 8D 14 18 48 23 D1 48 8D 0C D7 8B 14 D7 3B D6 74 ?? 3B D0 74 ?? 41 FF C0 45 3B C1 72 ?? 33 C9 48 8B 7C 24 20 48 8B 74 24 40 48 8B 6C 24 38 48 8B 5C 24 30 39 01 75 ?? 8B 41 04 83 F8 FF 74 ?? 48 69 C8 54 03 00 00 49 8D 83 ?? ?? ?? ?? 48 03 C1 48 83 C4 28 C3 49 8B 0A 48 83 C4 28 E9 ?? ?? ?? ??',
+     fields = {avatars = {'rip', {37}, {41}}, copy_map = {'u32', {93}}, copy_capacity = {'u32', {62}}, copy_empty = {'u32', {100}}, copy_multiplier = {'u32', {69}}, copies = {'u32', {188}}}},
+    {name = 'speed_record', rva = 0xa6ca4e, optional = true, text = 'E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 0F 57 F6 F3 44 0F 10 25 ?? ?? ?? ?? 48 8B E8',
+     fields = {speed_resolver = {'call', {1}, {5}}}},
+    {name = 'speeds_crouch', rva = 0xa6cc91, optional = true, text = 'F3 0F 10 7D ?? E9 ?? ?? ?? ?? 48 8D 8E 68 E1 53 00 49 03 CE E8 ?? ?? ?? ?? 84 C0 74 ?? F3 0F 10 7D ?? E9 ?? ?? ?? ?? 48 8D 8E B4 DC 53 00 49 03 CE E8 ?? ?? ?? ?? 84 C0 74 ?? F3 0F 59 7D ?? E9 ?? ?? ?? ?? F3 0F 59 7D ?? E9 ?? ?? ?? ??',
+     fields = {speed_crouch_sprint = {'u8', {4}}, speed_crouch_jog = {'u8', {33}}, speed_crouch_aim = {'u8', {62}}, speed_crouch_walk = {'u8', {72}}}},
+    {name = 'speeds_stand', rva = 0xa6cd29, optional = true, text = 'F3 0F 59 7D ?? E9 ?? ?? ?? ?? 4D 8D 24 36 49 8D 8C 24 60 E1 53 00 E8 ?? ?? ?? ?? 84 C0 74 ?? 48 8B 44 24 38 0F 2F B4 30 54 78 54 00 72 ?? 48 8B 0D ?? ?? ?? ?? 44 8B CF 41 B8 3B 00 00 00 8B D3 E8 ?? ?? ?? ?? 84 C0 75 ?? F3 0F 10 7D ?? EB ?? F3 0F 10 7D ?? EB ?? 48 8D 8E 68 E1 53 00 49 03 CE E8 ?? ?? ?? ?? 84 C0 74 ?? F3 0F 10 7D ?? EB ??',
+     fields = {speed_prone = {'u8', {4}}, speed_sprint_exhausted = {'u8', {77}}, speed_sprint = {'u8', {84}}, speed_jog = {'u8', {110}}}},
+    {name = 'speeds_walk', rva = 0xa6cdde, optional = true, text = '4D 23 F9 0F B6 C2 0F 44 C8 84 C9 74 ?? F3 0F 59 7D ?? EB ?? F3 0F 59 7D ??',
+     fields = {speed_aim = {'u8', {17}}, speed_walk = {'u8', {24}}}},
+    {name = 'speed_cap', rva = 0xa6d0bf, optional = true, text = 'F3 41 0F 10 45 08 0F 2F C6 48 8B BC 24 18 01 00 00 72 ?? F3 0F 5D C7 0F 28 F8 0F 2F F7 77 ?? F3 0F 10 35 ?? ?? ?? ?? F3 0F 5D F7 0F 28 BC 24 E0 00 00 00 4C 8D 44 24 60 0F 57 C0 F3 41 0F 11 75 04',
+     fields = {speed_cap = {'rip', {35}, {39}}}},
+    {name = 'title_enter', rva = 0xad59f7, optional = true, text = '41 80 BE ?? ?? ?? ?? 00 75 ?? 40 84 F6 75 ?? 32 C0 EB ?? B0 01 48 8B 15 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 88 47 ??',
+     fields = {intro_flag = {'u32', {3}}, title_no_intro = {'u8', {37}}}},
+    {name = 'title_register', rva = 0xad5c71, optional = true, text = '48 8B 0D ?? ?? ?? ?? 48 89 7C 24 30 C7 44 24 38 ?? ?? ?? ?? 0F 10 44 24 30 8B 81 ?? ?? ?? ?? 48 03 C0 0F 11 84 C1 ?? ?? ?? ?? FF 81 ?? ?? ?? ??',
+     fields = {states = {'rip', {3}, {7}}, title_type = {'u32', {16}}, title_count = {'u32', {27, 44}}, title_entries = {'u32', {38}}}},
+    {name = 'title_update', rva = 0xad7ce8, optional = true, text = '80 B9 ?? ?? ?? ?? 00 49 89 5B 08 0F 85 ?? ?? ?? ?? 4C 8B 05 ?? ?? ?? ?? 49 8D 53 18 48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 18 48 8B 05 ?? ?? ?? ?? 48 8B 48 10 48 8B 81 28 03 00 00 48 B9 7A 81 AD B7 09 C1 2A 4F FF D0 85 C0 0F 84 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 B9 F9 D9 A5 D5 73 0E BF 6C 48 8B 50 10 48 8B 82 28 03 00 00 FF D0 85 C0 0F 84 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8B CB 48 8B 50 10 48 8B 82 28 03 00 00 FF D0 85 C0 0F 84 ?? ?? ?? ?? 48 8B CE E8 ?? ?? ?? ?? C6 86 ?? ?? ?? ?? 01',
+     fields = {title_set_up = {'u32', {2, 160}}, title_setup = {'call', {154}, {158}}}},
+    {name = 'title_setup', rva = 0xad645f, optional = true, text = '41 80 7E ?? 00 0F 85 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? B2 03 C7 45 C7 00 00 00 3F C7 45 CB 00 00 00 3F C7 45 DF 00 00 00 3F 0F B6 88 79 74 08 00 48 8B 45 C7 88 4C 24 38 49 8D 8E ?? ?? ?? ?? C7 44 24 30 37 00 00 00 48 89 44 24 28 C7 45 E3 00 00 00 3F 48 8B 45 DF 48 C7 45 B7 00 00 00 00 4C 8B 4D B7 48 89 44 24 20 E8 ?? ?? ?? ?? 48 8B 1D ?? ?? ?? ?? 49 8D 96 ?? ?? ?? ?? 48 8D 8B 60 01 00 00 E8 ?? ?? ?? ?? 48 8D 8B 60 01 00 00 E8 ?? ?? ?? ?? 41 C6 86 ?? ?? ?? ?? 01',
+     fields = {title_no_intro = {'u8', {3}}, title_player = {'u32', {59, 119}}, title_has_player = {'u32', {150}}}},
+    {name = 'title_queue', rva = 0xad7f9b, optional = true, text = '80 BE ?? ?? ?? ?? 00 48 89 BC 24 B8 00 00 00 0F 84 ?? ?? ?? ?? 80 BE ?? ?? ?? ?? 00 75 ?? 80 7E ?? 00 75 ?? 4C 8B 15 ?? ?? ?? ?? BA C2 74 1A 2B 49 8B CF C6 44 24 20 00 41 80 BA 78 74 08 00 00 41 0F 95 C1 E8 ?? ?? ?? ??',
+     fields = {title_has_player = {'u32', {2}}, title_queued = {'u32', {23}}, title_no_intro = {'u8', {32}}}},
 }
 -- END SIGNATURES
 
@@ -361,23 +395,28 @@ end
 ---------------------------------------------------------------------------------------
 -- Configuration
 
--- Each skip is a Mod Options Menu choice; the value is the index into its modes (MODES, or QUICK_MODES for the skips
--- too short for a key press).
+-- Each feature is a Mod Options Menu choice; the value is the index into its modes (MODES, QUICK_MODES for the skips
+-- too short for a key press, SWITCH_MODES for the speed boost).
 local OPTION_PREFIX = 'alomare.skip_intro_animation.'
 local MODES = {'off', 'key', 'auto'}
 local QUICK_MODES = {'off', 'auto'}
-local MODE_NAMES = {off = 'Off', key = 'Manual', auto = 'Automatic'}
--- The hellpod entry is not a cutscene scene: it has no scenes, the mod follows the seat instead.
+local SWITCH_MODES = {'off', 'on'}
+local MODE_NAMES = {off = 'Off', key = 'Manual', auto = 'Automatic', on = 'On'}
+-- The intro, the hellpod entry, the zoom and the speed boost are not cutscene scenes: they have no scenes, the mod
+-- follows the title screen, the seat, the loadout screen and the movement record instead.
 local FEATURES = {
+    {id = 'intro', label = 'Intro cinematics', text = 'intro', scenes = {}, modes = QUICK_MODES},
     {id = 'login', label = 'Log-in ship intro', text = 'login', scenes = {'ship_intro', 'ship_bridge_intro'}},
     {id = 'pod', label = 'Cryo pod transition', text = 'pod', scenes = {'ship_teleporter_arrival'}},
     {id = 'ftl', label = 'FTL transition', text = 'ftl',
      scenes = {'ship_planet_departure', 'ship_planet_arrival', 'ship_teleporter_network_join'}},
     {id = 'hellpod', label = 'Hellpod to loadout', text = 'hellpod', scenes = {}, modes = QUICK_MODES},
     {id = 'zoom', label = 'Drop location zoom', text = 'zoom', scenes = {}, modes = QUICK_MODES},
+    {id = 'shipspeed', label = 'Ship walk speed boost', text = 'shipspeed', scenes = {}, modes = SWITCH_MODES,
+     normal = 'the ship speed is normal'},
 }
 local BINDING = 'alomare.skip_intro_animation.skip'
-local MAP_BINDING = 'alomare.skip_intro_animation.map'  -- Mod Bindings Menu key that closes the map, beside Escape
+local MAP_BINDING = 'alomare.skip_intro_animation.map'  -- Mod Bindings Menu key that closes the map, beside Ctrl
 -- Hellpod entry: on the ship (game state 3), the local Helldiver's seat moving into one of the ship's hellpods. Its
 -- seat record (64 bytes): +0 seat collection (the hellpod's entity id), moving byte, target node and deadline (offsets
 -- from the code). Then the Hellpod briefing (presenter 14) and its loadout screen (MenuScreenType 11), whose intro
@@ -419,9 +458,22 @@ local WARP_PLANS = {
     ship_teleporter_network_join = {[3] = {sig = 't15p3'}},
 }
 local FADE_SCENES = {ship_planet_departure = true, ship_planet_arrival = true}
--- The galactic map: the Hologram menu presenter. Outside it the presenter is looked at every MAP_IDLE frames.
+-- The galactic map: the Hologram menu presenter. Outside it the presenter is looked at every MAP_IDLE frames. Its key
+-- is either Ctrl (Escape is left to the game, which backs out one level per press).
 local HOLOGRAM, MAP_IDLE = 15, 10
-local ESCAPE_NAMES, VK_ESCAPE = {'esc', 'escape'}, 0x1b
+local CTRL_NAMES, VK_CONTROL = {'left ctrl', 'right ctrl'}, 0x11
+-- Ship walk speed boost: on the ship (game state 3) the local Helldiver's private movement record (copy_size bytes,
+-- the size the resolver's code proves) gets its speeds times `factor`, up to the game's own cap (read from the code);
+-- looked at every `every` frames (the Helldiver looked up again at least every `lookup_every`). Speeds are those the
+-- movement update reads (offsets from the code).
+local SPEED = {factor = 3, ship_state = 3, every = 15, lookup_every = 300, copy_size = 0x354, max_copies = 256,
+               fields = {'speed_walk', 'speed_jog', 'speed_sprint', 'speed_sprint_exhausted', 'speed_aim',
+                         'speed_crouch_walk', 'speed_crouch_jog', 'speed_crouch_sprint', 'speed_crouch_aim',
+                         'speed_prone'}}
+-- Intro cinematics: the game's state list holds the title object while the title screen is up. Before the first one
+-- the title is looked for every frame (after waiting up to menu_wait frames for Mod Options Menu's setting), then
+-- every `every` frames. Nothing is set once the game is on the ship (game state 3) or in a mission (4).
+local INTRO = {max_states = 256, menu_wait = 60, every = 10, mission_state = 4}
 
 ---------------------------------------------------------------------------------------
 -- Logging and status
@@ -479,18 +531,22 @@ end
 
 local native = {}
 
+-- Every mod shares one FFI namespace, and a name declared first keeps its declaration (a later ffi.cdef of it fails):
+-- the Windows functions are declared under our own names (asm aliases), so other mods' declarations can't change them.
 local function init_native()
-    -- Declared one by one: another mod may already have declared some of them.
     for _, decl in ipairs({
-        'void *GetCurrentProcess(void);',
-        'void *GetModuleHandleA(const char *name);',
-        'int ReadProcessMemory(void *process, const void *address, void *buffer, size_t size, size_t *read);',
-        'int WriteProcessMemory(void *process, void *address, const void *buffer, size_t size, size_t *written);',
+        'void *imd_GetCurrentProcess(void) __asm__("GetCurrentProcess");',
+        'void *imd_GetModuleHandleA(const char *name) __asm__("GetModuleHandleA");',
+        'int imd_ReadProcessMemory(void *process, const void *address, void *buffer, size_t size, size_t *read) '
+            .. '__asm__("ReadProcessMemory");',
+        'int imd_WriteProcessMemory(void *process, void *address, const void *buffer, size_t size, size_t *written) '
+            .. '__asm__("WriteProcessMemory");',
+        'unsigned int imd_GetCurrentProcessId(void) __asm__("GetCurrentProcessId");',
     }) do pcall(ffi.cdef, decl) end
     local ok, k32 = pcall(ffi.load, 'kernel32')
     if not ok then return false, 'kernel32 unavailable' end
-    native.k32, native.process = k32, k32.GetCurrentProcess()
-    local game = k32.GetModuleHandleA('game.dll')
+    native.k32, native.process = k32, k32.imd_GetCurrentProcess()
+    local game = k32.imd_GetModuleHandleA('game.dll')
     if game == nil then return false, 'game.dll not loaded' end
     native.base = tonumber(ffi.cast('uint64_t', game))
     return true
@@ -498,7 +554,7 @@ end
 
 local function read(address, size)
     local buf, got = ffi.new('uint8_t[?]', size), ffi.new('size_t[1]')
-    if native.k32.ReadProcessMemory(native.process, ffi.cast('const void *', address), buf, size, got) == 0
+    if native.k32.imd_ReadProcessMemory(native.process, ffi.cast('const void *', address), buf, size, got) == 0
        or tonumber(got[0]) ~= size then
         return nil
     end
@@ -507,7 +563,7 @@ end
 
 local function write(address, bytes)
     local got = ffi.new('size_t[1]')
-    local ok = native.k32.WriteProcessMemory(native.process, ffi.cast('void *', address), bytes, #bytes, got)
+    local ok = native.k32.imd_WriteProcessMemory(native.process, ffi.cast('void *', address), bytes, #bytes, got)
     return ok ~= 0 and tonumber(got[0]) == #bytes
 end
 
@@ -538,6 +594,18 @@ local function pointer(blob)
     local a = tonumber(v)
     if a < 0x10000 or a >= 0x800000000000 then return nil end
     return a
+end
+
+local function f32(blob)
+    if not blob or #blob ~= 4 then return nil end
+    local v = ffi.new('float[1]')
+    ffi.copy(v, blob, 4)
+    return tonumber(v[0])
+end
+
+local function byte_at(address)
+    local b = read(address, 1)
+    return b and b:byte()
 end
 
 local ZERO32 = string.rep('\0', 4)
@@ -595,6 +663,9 @@ local function map_usable()
     -- The Hologram case must be inside the close-request check the update calls.
     local at = code.found.hologram_request
     if not V.check or at < V.check or at > V.check + 0x400 then return false, 'the close-request check moved' end
+    -- Optional: the chat's text input, while which the keys are ignored (else they always count).
+    state.map.chat = (code.found.chat_notice and code.found.chat_input and V.hud and V.chat_hud and V.chat_open)
+                     and true or false
     return true
 end
 
@@ -627,6 +698,49 @@ local function zoom_usable()
     return true, '', {'map zoom'}
 end
 
+-- The speed boost: usable when the local Helldiver, the game state, its private record and every speed the movement
+-- update reads from it, and the speed cap are known.
+local function speed_usable()
+    for _, name in ipairs({'local_ref', 'ref_resolver', 'game_state', 'avatar_copy', 'speed_record', 'speeds_crouch',
+                           'speeds_stand', 'speeds_walk', 'speed_cap'}) do
+        if not code.found[name] then return false, 'code "' .. name .. '" ' .. (code.missing[name] or 'not found') end
+    end
+    if V.resolver ~= code.found.ref_resolver - 4 then return false, 'the avatar lookup calls another resolver' end
+    -- The movement update must read its speeds from the record the resolver found returns.
+    if V.speed_resolver ~= code.found.avatar_copy then return false, 'the movement update reads another record' end
+    local span = 0
+    for _, k in ipairs(SPEED.fields) do
+        if not V[k] then return false, 'value "' .. k .. '" unavailable' end
+        span = math.max(span, V[k] + 4)
+    end
+    for _, k in ipairs({'avatars', 'copy_map', 'copy_capacity', 'copy_empty', 'copy_multiplier', 'copies'}) do
+        if not V[k] then return false, 'value "' .. k .. '" unavailable' end
+    end
+    local cap = f32(read(native.base + V.speed_cap, 4))
+    if not cap or cap ~= cap or cap <= 0 or cap > 100 then return false, 'the speed cap is unreadable' end
+    SPEED.span, SPEED.cap = span, cap
+    return true, '', {string.format('ship movement record, capped at %g m/s', cap)}
+end
+
+-- The intro skip: usable when the game object's no-intro flag, the title object, its setup and its video queue are
+-- known, and the setup and queue checks are the ones the title's update runs.
+local function intro_usable()
+    for _, name in ipairs({'game_state', 'title_enter', 'title_register', 'title_update', 'title_setup',
+                           'title_queue'}) do
+        if not code.found[name] then return false, 'code "' .. name .. '" ' .. (code.missing[name] or 'not found') end
+    end
+    for _, k in ipairs({'game', 'intro_flag', 'title_no_intro', 'states', 'title_type', 'title_count', 'title_entries',
+                        'title_set_up', 'title_setup', 'title_has_player', 'title_queued'}) do
+        if not V[k] then return false, 'value "' .. k .. '" unavailable' end
+    end
+    local setup, update = code.found.title_setup, code.found.title_update
+    if setup < V.title_setup or setup > V.title_setup + 0x1000 then return false, 'the title setup moved' end
+    if code.found.title_queue < update or code.found.title_queue > update + 0x1000 then
+        return false, 'the intro video queue moved'
+    end
+    return true, '', {'title screen no-intro start'}
+end
+
 -- Writes the status file from the current modes and, once resolved, what each feature can use.
 local function report()
     if not state.ready then return end  -- still resolving (the map exit is always on); finish_resolution reports
@@ -640,15 +754,16 @@ local function report()
             text = string.format('%s: %s (%s)', feature.label, MODE_NAMES[feature.mode], table.concat(feature.found, ', '))
         else
             broken = broken + 1
-            text = feature.label .. ': NOT AVAILABLE, plays normally (' .. feature.why .. ')'
+            text = feature.label .. ': NOT AVAILABLE, ' .. (feature.normal or 'plays normally') .. ' (' .. feature.why .. ')'
         end
         lines[#lines + 1] = text
     end
     local map = state.map
     if map.usable then
         working = working + 1
-        lines[#lines + 1] = 'Galactic map quick exit: On (Escape or the Mod Bindings Menu key closes the map from any '
-                            .. 'level)'
+        lines[#lines + 1] = 'Galactic map quick exit: On (Ctrl or the Mod Bindings Menu key closes the map from any '
+                            .. 'level; ' .. (map.chat and 'not while typing in the chat)'
+                                             or 'the chat check is not available, so typing in the chat counts too)')
     else
         broken = broken + 1
         lines[#lines + 1] = 'Galactic map quick exit: NOT AVAILABLE, the map works as normal (' .. tostring(map.why) .. ')'
@@ -687,6 +802,12 @@ local function finish_resolution()
         elseif feature.id == 'zoom' then
             usable, why, scenes = zoom_usable()
             scenes = scenes or {}
+        elseif feature.id == 'shipspeed' then
+            usable, why, scenes = speed_usable()
+            scenes = scenes or {}
+        elseif feature.id == 'intro' then
+            usable, why, scenes = intro_usable()
+            scenes = scenes or {}
         elseif usable then
             for _, scene in ipairs(feature.scenes) do
                 local id = ids[scene]
@@ -720,7 +841,8 @@ local function finish_resolution()
         note(feature.label .. ': ' .. (usable and table.concat(scenes, ', ') or 'not available (' .. why .. ')'))
     end
     state.map.usable, state.map.why = map_usable()
-    note('Galactic map quick exit: ' .. (state.map.usable and 'available' or ('not available (' .. state.map.why .. ')')))
+    note('Galactic map quick exit: ' .. (state.map.usable and ('available, chat check ' .. (state.map.chat and 'on' or 'off'))
+                                         or ('not available (' .. state.map.why .. ')')))
     for _, line in ipairs(code:missing_list()) do note('Signature ' .. line) end
     for _, line in ipairs(code.problems) do note('Signature problem: ' .. line) end
     state.fader = derived.fader
@@ -818,11 +940,11 @@ local function warp_step(mgr, current, phase)
 end
 
 ---------------------------------------------------------------------------------------
--- Keys: spacebar for the skips (raw keyboard, plus an optional Mod Bindings Menu binding), Escape for the map
+-- Keys: spacebar for the skips (raw keyboard, plus an optional Mod Bindings Menu binding), Ctrl for the map
 
 -- pending: until when (game time) an unused skip press still counts.
 local key = {space = nil, space_down = false, menu = nil, menu_down = false, registered = false, wanted = false,
-             pending = nil, escape = nil, escape_down = false, map_registered = false, map_down = false}
+             pending = nil, ctrl = nil, ctrl_down = false, map_registered = false, map_down = false}
 
 -- Whether a Stingray keyboard button went down this frame (`field` keeps its id and state in `key`).
 local function keyboard_edge(id_field, down_field)
@@ -863,38 +985,56 @@ local function poll_key()
     return pressed
 end
 
--- Escape: the engine's keyboard (the first name it knows), else the Windows key state while the game has focus.
+-- Ctrl, left or right: the engine's keyboard buttons, else the Windows key state (either Ctrl) while the game has
+-- focus. Whether either went down this frame.
 local win = nil
-local function escape_pressed()
-    if key.escape == nil then
-        local keyboard = S and S.Keyboard
-        key.escape = false
+local function ctrl_down()
+    local keyboard = S and S.Keyboard
+    if key.ctrl == nil then
+        key.ctrl = false
+        local ids, names = {}, {}
         if keyboard and type(keyboard.button_id) == 'function' then
-            for _, name in ipairs(ESCAPE_NAMES) do
+            for _, name in ipairs(CTRL_NAMES) do
                 local ok, id = pcall(keyboard.button_id, name)
-                if ok and id then key.escape = id; note('Escape key: engine button "' .. name .. '"'); break end
+                if ok and id then ids[#ids + 1], names[#names + 1] = id, '"' .. name .. '"' end
             end
         end
-        if not key.escape then note('Escape key: Windows key state') end
+        if #ids > 0 then
+            key.ctrl = ids
+            note('Map key: engine buttons ' .. table.concat(names, ', '))
+        else
+            note('Map key: Windows key state (Ctrl)')
+        end
     end
-    if key.escape then return keyboard_edge('escape', 'escape_down') end
+    if key.ctrl then
+        for _, id in ipairs(key.ctrl) do
+            local ok, down = pcall(keyboard.pressed, id)
+            if ok and down then return true end
+        end
+        return false
+    end
     if win == nil then
         win = false
         pcall(function()
-            for _, decl in ipairs({'short GetAsyncKeyState(int key);', 'void *GetForegroundWindow(void);',
-                                   'unsigned int GetWindowThreadProcessId(void *window, unsigned int *process);',
-                                   'unsigned int GetCurrentProcessId(void);'}) do pcall(ffi.cdef, decl) end
+            for _, decl in ipairs({'short imd_GetAsyncKeyState(int key) __asm__("GetAsyncKeyState");',
+                                   'void *imd_GetForegroundWindow(void) __asm__("GetForegroundWindow");',
+                                   'unsigned int imd_GetWindowThreadProcessId(void *window, unsigned int *process) '
+                                       .. '__asm__("GetWindowThreadProcessId");'}) do pcall(ffi.cdef, decl) end
             win = {user32 = ffi.load('user32'), pid = ffi.new('unsigned int[1]')}
-            win.own = tonumber(native.k32.GetCurrentProcessId())
+            win.own = tonumber(native.k32.imd_GetCurrentProcessId())
         end)
     end
     if not win then return false end
-    local window = win.user32.GetForegroundWindow()
-    local focused = window ~= nil and (win.user32.GetWindowThreadProcessId(window, win.pid) or true)
+    local window = win.user32.imd_GetForegroundWindow()
+    local focused = window ~= nil and (win.user32.imd_GetWindowThreadProcessId(window, win.pid) or true)
                     and tonumber(win.pid[0]) == win.own
-    local down = focused and win.user32.GetAsyncKeyState(VK_ESCAPE) < 0 or false
-    local edge = down and not key.escape_down
-    key.escape_down = down
+    return focused and win.user32.imd_GetAsyncKeyState(VK_CONTROL) < 0 or false
+end
+
+local function ctrl_pressed()
+    local down = ctrl_down()
+    local edge = down and not key.ctrl_down
+    key.ctrl_down = down
     return edge
 end
 
@@ -919,6 +1059,13 @@ end
 ---------------------------------------------------------------------------------------
 -- Galactic Map Quick Exit
 
+-- Whether the chat's text input is open (the HUD's chat widget's byte); false when that can't be read.
+local function typing()
+    if not state.map.chat then return false end
+    local hud = pointer(read(native.base + V.hud, 8))
+    return hud ~= nil and (byte_at(hud + V.chat_hud + V.chat_open) or 0) ~= 0
+end
+
 local function map_step()
     local map = state.map
     -- The binding is registered (and its state followed) every frame, so a press made before the map opens is seen
@@ -930,21 +1077,26 @@ local function map_step()
     local current = mgr and u32(read(mgr + V.current_presenter, 4))
     if current ~= HOLOGRAM then
         if map.open then map.open = false; note('Galactic map closed') end
-        key.escape_down = false
+        key.ctrl_down = false
         return
     end
     if not map.open then
         map.open = true
-        escape_pressed()  -- the press that opened a menu over it doesn't count
+        ctrl_pressed()  -- a Ctrl held as the map opens doesn't count
         note('Galactic map open')
         return
     end
-    local escape = escape_pressed()
-    if not (escape or binding) then return end
+    local ctrl = ctrl_pressed()
+    if not (ctrl or binding) then return end
+    -- Typing in the chat on the map (Ctrl+V with Better Chat, or a letter bound to the map key) is not a request.
+    if typing() then
+        note((ctrl and 'Ctrl' or 'Map binding') .. ' on the galactic map ignored: the chat is open')
+        return
+    end
     -- The Hologram presenter's close request, as the presenter manager's update reads it: the game closes the map
     -- (and pops its screen) itself. The object is read fresh: it only exists while the map is open.
     local request = pointer(read(mgr + V.collection + V.holo_slot, 8))
-    local by = escape and 'Escape' or 'Map binding'
+    local by = ctrl and 'Ctrl' or 'Map binding'
     if request and write(request + V.close_flag, '\1') then
         note(by .. ' on the galactic map: close requested')
     else
@@ -1117,13 +1269,6 @@ end
 local zoom = {page = nil, skipped = nil}
 local zoom_feature = nil
 
-local function f32(blob)
-    if not blob or #blob ~= 4 then return nil end
-    local v = ffi.new('float[1]')
-    ffi.copy(v, blob, 4)
-    return tonumber(v[0])
-end
-
 -- The value the loadout page waits on while the zoom runs (a pick made, the value short of 1): its address, value
 -- and which branch ('progress' with players in the drop group, 'synced' without), or nil.
 local function zoom_running(screen)
@@ -1169,6 +1314,203 @@ local function zoom_step()
 end
 
 ---------------------------------------------------------------------------------------
+-- Ship walk speed boost: the speeds in the local Helldiver's private movement record, on the ship only
+
+-- entity / address: the record last boosted; base: its bytes before (per field); wrote: the bytes written (per field);
+-- failed: a record whose write failed (left alone); noted: the last one-off log line; looked: the frame of the last
+-- lookup of the Helldiver.
+local boost = {entity = nil, address = nil, base = nil, wrote = nil, failed = nil, noted = nil, looked = 0}
+local speed_feature = nil
+
+-- The local Helldiver's entity id and the address of its private movement record, or nil (no Helldiver, or no copy:
+-- it reads the shared record, which the boost never changes).
+local function private_record()
+    local avatar = local_avatar()
+    local avatars = avatar and pointer(read(native.base + V.avatars, 8))
+    local index = avatars and lookup(avatars, {map = V.copy_map, capacity = V.copy_capacity, empty = V.copy_empty,
+                                               multiplier = V.copy_multiplier}, avatar)
+    if not index or index >= SPEED.max_copies then return nil end
+    return avatar, avatars + V.copies + index * SPEED.copy_size
+end
+
+-- Each speed field's 4 bytes and value in a record, or nil.
+local function read_speeds(address)
+    local blob = read(address, SPEED.span)
+    if not blob then return nil end
+    local raw, values = {}, {}
+    for _, name in ipairs(SPEED.fields) do
+        raw[name] = blob:sub(V[name] + 1, V[name] + 4)
+        values[name] = f32(raw[name])
+    end
+    return raw, values
+end
+
+local function holds(raw, bytes)
+    for _, name in ipairs(SPEED.fields) do if raw[name] ~= bytes[name] then return false end end
+    return true
+end
+
+local function boost_note(key, msg)
+    if boost.noted == key then return end
+    boost.noted = key
+    note('Ship walk speed boost: ' .. msg)
+end
+
+-- Puts the speeds back, only into the local Helldiver's own record (looked up again) and only while it still holds
+-- what was written; then forgets the record.
+local function unboost(why)
+    local entity, address = private_record()
+    if boost.wrote and entity == boost.entity and address == boost.address then
+        local raw = read_speeds(address)
+        if raw and holds(raw, boost.wrote) then
+            for _, name in ipairs(SPEED.fields) do write(address + V[name], boost.base[name]) end
+            note('Ship walk speed boost: speeds put back (' .. why .. ')')
+        end
+    end
+    boost.entity, boost.address, boost.base, boost.wrote = nil, nil, nil, nil
+end
+
+local function speed_step()
+    local feature = speed_feature
+    if not (feature and feature.usable) or M.frames % SPEED.every ~= 0 then return end
+    if feature.mode == 'off' then
+        if boost.wrote then unboost('switched off') end
+        return
+    end
+    if game_state() ~= SPEED.ship_state then
+        if boost.wrote then unboost('left the ship') end
+        return
+    end
+    -- While the record boosted still holds the boost, only it is read (the Helldiver is looked up again every
+    -- `lookup_every` frames, or as soon as the record changes: a write always follows a fresh lookup).
+    if boost.wrote and M.frames - boost.looked < SPEED.lookup_every then
+        local raw = read_speeds(boost.address)
+        if raw and holds(raw, boost.wrote) then return end
+    end
+    boost.looked = M.frames
+    local entity, address = private_record()
+    if not entity then return boost_note('none', 'the local Helldiver has no ship movement record yet') end
+    local raw, values = read_speeds(address)
+    if not raw then return end
+    if boost.wrote and entity == boost.entity and address == boost.address and holds(raw, boost.wrote) then return end
+    if boost.failed == address then return end
+    -- A Helldiver new on board, or its record made again (a respawn): its current speeds are the ship's own.
+    local wrote = {}
+    for _, name in ipairs(SPEED.fields) do
+        local v = values[name]
+        if not v or v ~= v or v == math.huge or v == -math.huge then
+            return boost_note('odd', 'the movement record holds a value that is not a speed; left alone')
+        end
+        -- Never slower: a speed at or above the cap, or not above 0, stays as it is.
+        local target = v > 0 and math.max(v, math.min(v * SPEED.factor, SPEED.cap)) or v
+        wrote[name] = ffi.string(ffi.new('float[1]', target), 4)
+    end
+    for _, name in ipairs(SPEED.fields) do
+        if not write(address + V[name], wrote[name]) then
+            for _, back in ipairs(SPEED.fields) do write(address + V[back], raw[back]) end
+            boost.failed = address
+            return boost_note('failed', 'a write failed; the speeds were put back and are left alone')
+        end
+    end
+    boost.entity, boost.address, boost.base, boost.wrote, boost.noted = entity, address, raw, wrote, nil
+    local parts = {}
+    for _, name in ipairs({'speed_walk', 'speed_jog', 'speed_sprint'}) do
+        parts[#parts + 1] = string.format('%s %.2f -> %.2f', name:sub(7), f32(raw[name]), f32(wrote[name]))
+    end
+    note(string.format('Ship walk speed boost: on, entity %d (%s m/s; cap %g)', entity, table.concat(parts, ', '),
+                       SPEED.cap))
+end
+
+---------------------------------------------------------------------------------------
+-- Intro cinematics: the title screen's own no-intro start
+
+-- flag / original: the game's no-intro flag while the mod has it set, and the byte it held; title: the title object
+-- handled (until it closes); first: the first title screen has been handled.
+local intro = {flag = nil, original = nil, title = nil, first = false, untouched = false}
+local intro_feature = nil
+
+-- The title object while the title screen is up, or nil.
+local function title_object()
+    local states = pointer(read(native.base + V.states, 8))
+    local count = states and u32(read(states + V.title_count, 4))
+    if not count or count == 0 or count > INTRO.max_states then return nil end
+    local blob = read(states + V.title_entries, count * 16)
+    if not blob then return nil end
+    for i = 0, count - 1 do
+        if u32(blob, i * 16 + 8) == V.title_type then return pointer(blob:sub(i * 16 + 1, i * 16 + 8)) end
+    end
+end
+
+local function game_object()
+    return derived.game and pointer(read(native.base + derived.game, 8))
+end
+
+-- Puts the game's no-intro flag back, if the mod set it and it still holds the mod's 1.
+local function restore_flag(why)
+    if not intro.flag then return end
+    if byte_at(intro.flag) == 1 and write(intro.flag, intro.original) then
+        note('Intro cinematics: the game\'s no-intro flag put back (' .. why .. ')')
+    end
+    intro.flag, intro.original = nil, nil
+end
+
+local function intro_step()
+    local feature = intro_feature
+    if not (feature and feature.usable) then return end
+    if feature.mode == 'off' then return restore_flag('switched off') end
+    if not state.menu and M.frames < INTRO.menu_wait then return end  -- Mod Options Menu may load after this addon
+    if intro.first and M.frames % INTRO.every ~= 0 then return end
+    local title = title_object()
+    if not title then
+        if intro.title then note('Intro cinematics: title screen closed') end
+        intro.title = nil
+        if intro.first or intro.untouched then return end
+        -- On the ship or in a mission already (the title screen passed before the mod started): nothing to skip.
+        local now_state = game_state()
+        if now_state == SPEED.ship_state or now_state == INTRO.mission_state then
+            intro.first = true
+            note('Intro cinematics: no title screen before game state ' .. now_state .. '; nothing to do')
+            return restore_flag('the game went on without a title screen')
+        end
+        if intro.flag then return end
+        -- Before the first title screen: the game's own no-intro flag, which only the title screen's start reads.
+        local game = game_object()
+        local now = game and read(game + V.intro_flag, 1)
+        if now == '\0' then
+            if write(game + V.intro_flag, '\1') then
+                intro.flag, intro.original = game + V.intro_flag, now
+                note('Intro cinematics: no-intro flag set before the title screen')
+            end
+        elseif now then
+            intro.untouched = true
+            note('Intro cinematics: the game\'s no-intro flag is already set (' .. now:byte() .. '); left alone')
+        end
+        return
+    end
+    if title == intro.title then return end
+    intro.title, intro.first = title, true
+    -- The title screen has started (its start has read the flag).
+    local game = game_object()
+    local other = (game == nil or pointer(read(title, 8)) ~= game) and ' (the title screen holds another game object)'
+                  or ''
+    local no_intro, queued = byte_at(title + V.title_no_intro), byte_at(title + V.title_queued)
+    if not (no_intro and queued) then
+        note('Intro cinematics: title screen unreadable' .. other)
+    elseif no_intro ~= 0 then
+        note('Intro cinematics: the title screen started without them, '
+             .. (intro.flag and 'from the no-intro flag' or 'on its own') .. other)
+    elseif queued == 0 then
+        -- Its start missed the flag: the byte is set now, before the videos are queued (without the start's own
+        -- continue: the title screen waits for a key press as after the videos).
+        local ok = write(title + V.title_no_intro, '\1')
+        note('Intro cinematics: ' .. (ok and 'no-intro set on the title screen' or 'write failed') .. other)
+    else
+        note('Intro cinematics: too late, the videos were already queued' .. other)
+    end
+    restore_flag('the title screen has started')
+end
+
+---------------------------------------------------------------------------------------
 -- Frame step
 
 local function step()
@@ -1178,6 +1520,9 @@ local function step()
     end
     map_step()
     local pressed = poll_key()
+    -- The intro and the speed boost undo their own changes when switched off, so they run whatever the modes.
+    intro_step()
+    speed_step()
     if not state.skips_on and not run.warp then key.pending = nil; return end  -- only the map exit: no scene polling
     -- A press is kept for a moment, so one made a frame before its scene is seen still counts.
     if pressed and key.wanted then key.pending = M.time + PRESS_KEEP end
@@ -1259,6 +1604,8 @@ for _, feature in ipairs(FEATURES) do
     if feature.mode == 'key' then key.wanted = true end
     if feature.id == 'hellpod' then hellpod_feature = feature end
     if feature.id == 'zoom' then zoom_feature = feature end
+    if feature.id == 'shipspeed' then speed_feature = feature end
+    if feature.id == 'intro' then intro_feature = feature end
 end
 state.skips_on = true  -- the map exit is always on, so native access always starts
 
@@ -1289,11 +1636,13 @@ local function connect_menu()
     local automatic = host_text(menu, 2, 'option.choice.automatic', 48)
     local choices = {'Off', host_text(menu, 2, 'option.choice.manual', 48), automatic}
     local quick = {'Off', automatic}
+    local switch = {'Off', 'On'}
     for _, feature in ipairs(FEATURES) do
         local id = OPTION_PREFIX .. feature.id
         local ok, done, why = pcall(menu.register_option, id, {
             type = 'choice', label = host_text(menu, 2, 'option.' .. feature.text .. '.label', 64), mod = mod,
-            choices = feature.modes == QUICK_MODES and quick or choices, default = feature.default,
+            choices = feature.modes == QUICK_MODES and quick or feature.modes == SWITCH_MODES and switch or choices,
+            default = feature.default,
             description = host_text(menu, 2, 'option.' .. feature.text .. '.description', 400)})
         if ok and done then
             pcall(menu.on_change, id, function(value)
@@ -1344,5 +1693,5 @@ end
 
 note('Impatient Diver ' .. M.version .. ' loaded')
 M._test = {state = state, values = V, derived = derived, run = run, code = function() return code end,
-           features = FEATURES, zoom = zoom}  -- offline tests
+           features = FEATURES, zoom = zoom, boost = boost, intro = intro}  -- offline tests
 return M
