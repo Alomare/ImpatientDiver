@@ -19,6 +19,8 @@ return {
         ['option.intro.description'] = 'L\'annuncio di Super Terra e il video di reclutamento all\'avvio del gioco. Automatico: non vengono mai caricati né riprodotti. Ha effetto dal prossimo avvio del gioco.',
         ['option.shipspeed.label'] = 'Passo veloce sulla nave',
         ['option.shipspeed.description'] = 'Il tuo Helldiver si muove tre volte più veloce a bordo della nave, fino al limite di velocità del gioco. Le missioni non cambiano.',
+        ['option.mapesc.label'] = 'ESC chiude la mappa galattica',
+        ['option.mapesc.description'] = 'Esc chiude subito la mappa galattica da qualsiasi livello (missione, operazione, pianeta o settore). Disattivato: Esc torna indietro di un livello a ogni pressione, come nel gioco. Il tuo tasto di Mod Bindings Menu la chiude in ogni caso.',
         ['binding.skip'] = 'Salta filmato',
         ['binding.map'] = 'Chiudi mappa galattica',
     },

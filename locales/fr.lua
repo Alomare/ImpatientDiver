@@ -19,6 +19,8 @@ return {
         ['option.intro.description'] = 'L\'annonce de Super-Terre et la vidéo de recrutement au lancement du jeu. Automatique : elles ne sont jamais chargées ni jouées. Prend effet au prochain lancement du jeu.',
         ['option.shipspeed.label'] = 'Marche rapide dans le vaisseau',
         ['option.shipspeed.description'] = 'Votre Helldiver se déplace trois fois plus vite à bord du vaisseau, jusqu\'à la limite de vitesse du jeu. Les missions ne changent pas.',
+        ['option.mapesc.label'] = 'Échap ferme la carte galactique',
+        ['option.mapesc.description'] = 'Échap ferme la carte galactique immédiatement, depuis n\'importe quel niveau (mission, opération, planète ou secteur). Désactivé : Échap remonte d\'un niveau par pression, comme dans le jeu. Ta touche de Mod Bindings Menu la ferme dans tous les cas.',
         ['binding.skip'] = 'Passer la cinématique',
         ['binding.map'] = 'Fermer la carte galactique',
     },

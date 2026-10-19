@@ -19,6 +19,8 @@ return {
         ['option.intro.description'] = '游戏启动时超级地球的公告和征兵视频。自动：完全不会加载或播放。从下次启动游戏起生效。',
         ['option.shipspeed.label'] = '舰船内移动加速',
         ['option.shipspeed.description'] = '在舰船上，你的绝地潜兵移动速度提升为三倍（最高到游戏本身的速度上限）。任务中不受影响。',
+        ['option.mapesc.label'] = 'ESC 关闭星系地图',
+        ['option.mapesc.description'] = '按 Esc 可从任何层级（任务、行动、星球或星区）立即关闭星系地图。关闭此项：与游戏原本一样，每按一次 Esc 返回一级。你在 Mod Bindings Menu 中设置的按键在两种情况下都能关闭地图。',
         ['binding.skip'] = '跳过过场动画',
         ['binding.map'] = '关闭星系地图',
     },

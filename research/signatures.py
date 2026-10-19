@@ -1,4 +1,4 @@
-"""Impatient Diver's code signatures (NOTES.md): checked against the game.dll dump and written into
+"""Impatient Diver's code signatures (RESEARCH.md "Signatures"): checked against the game.dll dump and written into
 skip_intro_animation.lua between the SIGNATURES markers, with the shared signature engine (tools/sigscan.lua)
 between the SIGNATURE ENGINE markers.
 

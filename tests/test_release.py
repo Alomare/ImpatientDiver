@@ -125,7 +125,7 @@ for _, decl in ipairs({'uintptr_t GetCurrentProcess(void);', 'uintptr_t GetModul
     cdef(decl)
 end
 
--- The engine keyboard: spacebar 44, left Ctrl 29, right Ctrl 157 (Escape 27 too, which the mod must not use).
+-- The engine keyboard: spacebar 44, Escape 27 (both names), left Ctrl 29 and right Ctrl 157 (which the mod must not use).
 local KEY_IDS = {space = 44, ['left ctrl'] = 29, ['right ctrl'] = 157, esc = 27, escape = 27}
 stingray = {
     Keyboard = {button_id = function(n) return KEY_IDS[n] end,
@@ -153,6 +153,8 @@ fake.option_menu = {api = 1,
         for _, c in ipairs(spec.choices) do if not plain(c, 48) then return false, 'invalid choice name' end end
         local d = spec.default or 1
         if type(d) ~= 'number' or d % 1 ~= 0 or d < 1 or d > #spec.choices then return false, 'invalid default' end
+        fake.order = fake.order or {}
+        fake.order[#fake.order + 1] = id:match('[^.]+$') .. (spec.gap and ' (gap)' or '')
         fake.options[id] = spec
         return true
     end,
@@ -531,8 +533,11 @@ def main():
     every = ['alomare.skip_intro_animation.' + k for k in FEATURE_IDS]
     quick = ['alomare.skip_intro_animation.' + k for k in QUICK]
     switch = ['alomare.skip_intro_animation.' + k for k in SWITCH]
-    check(ids == sorted(every)
-          and all(opts[i].mod == 'Impatient Diver' and opts[i].type == 'choice' for i in every)
+    esc = 'alomare.skip_intro_animation.mapesc'
+    check(ids == sorted(every + [esc])
+          and all(opts[i].mod == 'Impatient Diver' and opts[i].type == 'choice' for i in every + [esc])
+          and opts[esc].default == 2 and list(opts[esc].choices.values()) == ['Off', 'On']
+          and opts[esc].label == 'ESC Closes Galactic Map'
           and all(opts[i].default == 3 and list(opts[i].choices.values()) == ['Off', 'Manual', 'Automatic']
                   for i in every if i not in quick + switch)
           and all(opts[i].default == 2 and list(opts[i].choices.values()) == ['Off', 'Automatic'] for i in quick)
@@ -540,8 +545,11 @@ def main():
           and [opts['alomare.skip_intro_animation.' + k].label for k in FEATURE_IDS]
           == ['Intro Cinematics', 'Log-in Ship Intro', 'Cryo Pod Transition', 'FTL Transition', 'Hellpod to Loadout',
               'Drop Location Zoom', 'Ship Walk Speed Boost'],
-          'three Off/Manual/Automatic options, three Off/Automatic ones and an Off/On one (no map toggle), the skips on and the boost off by '
-          'default, in the order they happen')
+          'ESC Closes Galactic Map (On), three Off/Manual/Automatic options, three Off/Automatic ones and the speed boost '
+          '(Off), the skips on by default')
+    check(list(f.order.values()) == ['mapesc', 'shipspeed', 'intro (gap)', 'login', 'pod', 'ftl', 'hellpod', 'zoom'],
+          'menu order: ESC Closes Galactic Map, the speed boost, a gap, the skips in the order they happen: %r'
+          % list(f.order.values()))
     check(f.map_bound == 'alomare.skip_intro_animation.map|Close galactic map',
           'the map key is a Mod Bindings Menu binding: %r' % f.map_bound)
     check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene',
@@ -581,7 +589,7 @@ def main():
           and 'Hellpod to loadout: Automatic (seat transition, briefing intro)' in status
           and 'Intro cinematics: Automatic (title screen no-intro start)' in status
           and 'Ship walk speed boost: Off' in status
-          and 'Galactic map quick exit: On (Ctrl or the Mod Bindings Menu key' in status,
+          and 'Galactic map quick exit: On (Escape or the Mod Bindings Menu key' in status,
           'without Mod Options Menu: every skip Automatic, the speed boost off, the map exit on: %r' % (status,))
     f.frame_step(1)
     check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene',
@@ -621,7 +629,7 @@ def main():
     lua, logs = new_game([], image, "fake.option_menu.version = 2; fake.option_menu.register_option = "
                                     "function(id, spec) fake.options[id] = spec; return true end; "
                                     "ModBindingsMenu.version = 3; ModBindingsMenu.register_binding = function(id, label, slot, o) "
-                                    "fake.bind(id, label() .. '|' .. o.category()); return true end")
+                                    "fake.bind(id, label() .. '|' .. o.category() .. '|' .. tostring(o.backend)); return true end")
     f = fake(lua)
     f.apply('pod', 2)
     f.frame_step(2)
@@ -629,9 +637,10 @@ def main():
     check(callable(o.label) and o.label() == 'Cryo Pod Transition' and o.mod() == 'Impatient Diver'
           and o.choices[1] == 'Off' and o.choices[2]() == 'Manual' and o.choices[3]() == 'Automatic'
           and len(o.description()) <= 400, 'v1.1 menu: texts passed as functions, OFF plain')
-    check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene|Impatient Diver'
-          and f.map_bound == 'alomare.skip_intro_animation.map|Close galactic map|Impatient Diver',
-          'v2.1 bindings: labels and section passed as functions: %r %r' % (f.bound, f.map_bound))
+    check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene|Impatient Diver|nil'
+          and f.map_bound == 'alomare.skip_intro_animation.map|Close galactic map|Impatient Diver|nil',
+          'v2.1 bindings: labels and section passed as functions; v2.3: no backend asked for: %r %r'
+          % (f.bound, f.map_bound))
 
     # 2. All three selected, this build: fast path resolves everything from the real code.
     lua, logs = new_game(['login_auto', 'pod_key', 'ftl_auto'], image)
@@ -918,68 +927,85 @@ def main():
     check(early == '' and late_by_a_frame == 'update 11 2->3',
           'a press 2 s before a scene is not kept %r; one a frame before is %r' % (early, late_by_a_frame))
 
-    # 6. Galactic Map Quick Exit (always on): Ctrl (left or right) or the Mod Bindings Menu key on the map sets the
-    #    Hologram presenter's close request (the game's presenter manager then closes it); nothing elsewhere. Escape
-    #    is left to the game (one level back per press).
+    # 6. Galactic Map Quick Exit: Escape (ESC Closes Galactic Map, On by default) or the Mod Bindings Menu key on the
+    #    map sets the Hologram presenter's close request (the game's presenter manager then closes it); nothing
+    #    elsewhere. Ctrl does nothing. With the option Off, Escape is left to the game (one level back per press).
     lua, logs = new_game([], image)
     f = fake(lua)
     f.frame_step(1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 1 feature(s) active') and 'Galactic map quick exit: On (Ctrl' in status,
+    check(status.startswith('OK - 1 feature(s) active') and 'Galactic map quick exit: On (Escape' in status,
           'map exit on: status says so: %r' % (status.splitlines()[:1],))
     reads = f.reads
     f.frame_step(100)
     check((f.reads - reads) / 100 <= 0.3, 'map closed: %.2f reads per frame' % ((f.reads - reads) / 100))
     f.set_presenter(15)
     f.frame_step(11)
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(3)
+    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.rctrl = True; f.frame_step(1); f.rctrl = False; f.frame_step(3)
     check(f.close_request() == 0 and 'close requested' not in text(logs / 'ImpatientDiver.log'),
-          'Escape on the galactic map: left to the game')
-    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
+          'Ctrl on the galactic map: nothing')
+    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
     log = text(logs / 'ImpatientDiver.log')
-    check(f.close_request() == 1 and 'Ctrl on the galactic map: close requested' in log
-          and 'Map key: engine buttons "left ctrl", "right ctrl"' in log,
-          'left Ctrl on the galactic map: close request set')
+    check(f.close_request() == 1 and 'Escape on the galactic map: close requested' in log
+          and 'Map key: engine buttons "esc", "escape"' in log,
+          'Escape on the galactic map: close request set')
     f.clear_request()
     f.frame_step(5)
     check(f.close_request() == 0, 'one request per press')
-    f.rctrl = True; f.frame_step(1); f.rctrl = False; f.frame_step(1)
-    check(f.close_request() == 1, 'right Ctrl too')
-    f.clear_request()
     f.set_presenter(0)
     f.frame_step(11)
-    f.ctrl = True
+    f.escape = True
     f.set_presenter(15)
     f.frame_step(12)
-    f.ctrl = False; f.frame_step(1)
-    check(f.close_request() == 0, 'a Ctrl held while the map opens does not close it')
-    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
+    f.escape = False; f.frame_step(1)
+    check(f.close_request() == 0, 'an Escape held while the map opens does not close it')
+    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
     check(f.close_request() == 1, 'the next press does')
     f.clear_request()
     f.set_presenter(3)
     f.frame_step(11)
-    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(11)
-    check(f.close_request() == 0, 'Ctrl in another menu: nothing written')
-    # Typing in the chat on the map: Ctrl (Ctrl+V) and the map key are ignored while its text input is open.
+    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(11)
+    check(f.close_request() == 0, 'Escape in another menu: nothing written')
+    # Typing in the chat on the map: Escape (it closes the chat) and the map key are ignored while its input is open.
     f.set_presenter(15); f.frame_step(11)
     f.chat(True)
-    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
+    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
     f.map_key = True; f.frame_step(1); f.map_key = False; f.frame_step(1)
     typed = f.close_request()
     f.chat(False)
-    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
+    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
     log = text(logs / 'ImpatientDiver.log')
-    check(typed == 0 and f.close_request() == 1 and 'Ctrl on the galactic map ignored: the chat is open' in log
+    check(typed == 0 and f.close_request() == 1 and 'Escape on the galactic map ignored: the chat is open' in log
           and 'Map binding on the galactic map ignored: the chat is open' in log
           and 'not while typing in the chat' in text(logs / 'ImpatientDiver_STATUS.log'),
-          'chat open on the map: Ctrl and the map key ignored; chat closed: Ctrl closes the map')
+          'chat open on the map: Escape and the map key ignored; chat closed: Escape closes the map')
+    f.clear_request()
+    # ESC Closes Galactic Map Off: Escape is left to the game, the map key still closes it; On again with Escape
+    # held is not a press.
+    f.apply('mapesc', 1)
+    f.frame_step(1)
+    status = text(logs / 'ImpatientDiver_STATUS.log')
+    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
+    off_escape = f.close_request()
+    f.map_key = True; f.frame_step(1); f.map_key = False; f.frame_step(1)
+    off_key = f.close_request()
+    f.clear_request()
+    f.escape = True; f.frame_step(1)
+    f.apply('mapesc', 2)
+    f.frame_step(3); f.escape = False; f.frame_step(1)
+    held = f.close_request()
+    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
+    check(off_escape == 0 and off_key == 1 and held == 0 and f.close_request() == 1
+          and 'ESC Closes Galactic Map is Off' in status and 'ESC Closes Galactic Map set to Off' in text(logs / 'ImpatientDiver.log'),
+          'Off: Escape left to the game (%d), the map key closes it (%d); On with Escape held: no press (%d), the next '
+          'press closes it' % (off_escape, off_key, held))
     f.clear_request(); f.set_presenter(3); f.frame_step(11)
     rva, code = sig_bytes(image, 'chat_input')
     lua, logs = new_game([], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
     f = fake(lua)
     f.frame_step(40)
     f.set_presenter(15); f.frame_step(11)
-    f.chat(True); f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
+    f.chat(True); f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
     status = text(logs / 'ImpatientDiver_STATUS.log')
     check(f.close_request() == 1 and status.startswith('OK - 1 feature(s) active')
           and 'the chat check is not available, so typing in the chat counts too' in status,

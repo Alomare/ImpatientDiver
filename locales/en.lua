@@ -29,8 +29,11 @@ return {
         -- Not a skip: Off or On (the game's own words). The game caps every movement speed at 10 m/s.
         ['option.shipspeed.label'] = 'Ship Walk Speed Boost',
         ['option.shipspeed.description'] = 'Your Helldiver moves three times as fast aboard the ship, up to the game\'s own speed limit. Missions are untouched.',
-        -- The key names in Mod Bindings Menu: the skip key, and a key that closes the galactic map at once (Ctrl
-        -- always does).
+        -- Off or On (the game's own words): Escape closes the galactic map at once instead of backing out one level.
+        ['option.mapesc.label'] = 'ESC Closes Galactic Map',
+        ['option.mapesc.description'] = 'Escape closes the galactic map at once from any level (mission, operation, planet or sector). Off: Escape backs out one level per press, as in the game. Your Mod Bindings Menu key closes it either way.',
+        -- The key names in Mod Bindings Menu: the skip key, and a key that closes the galactic map at once (Escape
+        -- does too while ESC Closes Galactic Map is On).
         ['binding.skip'] = 'Skip cutscene',
         ['binding.map'] = 'Close galactic map',
     },
@@ -42,5 +45,6 @@ return {
               ['option.zoom.label'] = 64, ['option.zoom.description'] = 400,
               ['option.intro.label'] = 64, ['option.intro.description'] = 400,
               ['option.shipspeed.label'] = 64, ['option.shipspeed.description'] = 400,
+              ['option.mapesc.label'] = 64, ['option.mapesc.description'] = 400,
               ['binding.skip'] = 64, ['binding.map'] = 64},
 }

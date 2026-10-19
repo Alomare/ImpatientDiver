@@ -19,6 +19,8 @@ return {
         ['option.intro.description'] = 'El anuncio de Supertierra y el vídeo de reclutamiento al iniciar el juego. Automático: nunca se cargan ni se reproducen. Se aplica a partir del próximo inicio del juego.',
         ['option.shipspeed.label'] = 'Velocidad extra en la nave',
         ['option.shipspeed.description'] = 'Tu Helldiver se mueve tres veces más rápido a bordo de la nave, hasta el límite de velocidad del propio juego. Las misiones no cambian.',
+        ['option.mapesc.label'] = 'ESC cierra el mapa galáctico',
+        ['option.mapesc.description'] = 'Escape cierra el mapa galáctico al instante desde cualquier nivel (misión, operación, planeta o sector). Desactivado: Escape retrocede un nivel por pulsación, como en el juego. Tu tecla de Mod Bindings Menu lo cierra en ambos casos.',
         ['binding.skip'] = 'Omitir cinemática',
         ['binding.map'] = 'Cerrar mapa galáctico',
     },

@@ -19,6 +19,8 @@ return {
         ['option.intro.description'] = 'Die Bekanntmachung von Über-Erde und das Rekrutierungsvideo beim Spielstart. Automatisch: Sie werden nie geladen oder abgespielt. Gilt ab dem nächsten Spielstart.',
         ['option.shipspeed.label'] = 'Schnelleres Laufen auf dem Schiff',
         ['option.shipspeed.description'] = 'Dein Helldiver bewegt sich an Bord des Schiffs dreimal so schnell, bis zur Geschwindigkeitsgrenze des Spiels. Missionen bleiben unverändert.',
+        ['option.mapesc.label'] = 'ESC schließt die Galaxiekarte',
+        ['option.mapesc.description'] = 'Escape schließt die Galaxiekarte sofort, von jeder Ebene aus (Mission, Operation, Planet oder Sektor). Aus: Escape geht pro Druck eine Ebene zurück, wie im Spiel. Deine Taste aus Mod Bindings Menu schließt sie in jedem Fall.',
         ['binding.skip'] = 'Zwischensequenz überspringen',
         ['binding.map'] = 'Galaxiekarte schließen',
     },

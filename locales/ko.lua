@@ -19,6 +19,8 @@ return {
         ['option.intro.description'] = '게임 시작 시 나오는 슈퍼지구 공지와 모병 영상. 자동: 불러오지도 재생하지도 않습니다. 다음 게임 시작부터 적용됩니다.',
         ['option.shipspeed.label'] = '함선 내 이동 속도 증가',
         ['option.shipspeed.description'] = '함선 안에서 헬다이버의 이동 속도가 3배가 됩니다(게임 자체의 속도 한계까지). 임무에는 영향이 없습니다.',
+        ['option.mapesc.label'] = 'ESC로 은하 지도 닫기',
+        ['option.mapesc.description'] = 'Esc 키로 어느 단계(임무, 작전, 행성, 구역)에서든 은하 지도를 바로 닫습니다. 끔: 게임 기본 동작대로 Esc를 누를 때마다 한 단계씩 뒤로 갑니다. Mod Bindings Menu 키로는 어느 경우든 닫을 수 있습니다.',
         ['binding.skip'] = '컷신 건너뛰기',
         ['binding.map'] = '은하 지도 닫기',
     },
