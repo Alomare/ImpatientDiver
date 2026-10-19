@@ -19,6 +19,8 @@ return {
         ['option.intro.description'] = '遊戲啟動時超級地球的公告和徵兵影片。自動：完全不會載入或播放。從下次啟動遊戲起生效。',
         ['option.shipspeed.label'] = '太空船內移動加速',
         ['option.shipspeed.description'] = '在太空船上，你的絕地戰兵移動速度提升為三倍（最高到遊戲本身的速度上限）。任務中不受影響。',
+        ['option.mapesc.label'] = 'ESC 關閉銀河地圖',
+        ['option.mapesc.description'] = '按 Esc 可從任何層級（任務、行動、星球或星區）立即關閉銀河地圖。關閉此項：與遊戲原本一樣，每按一次 Esc 返回一層。你在 Mod Bindings Menu 中設定的按鍵在兩種情況下都能關閉地圖。',
         ['binding.skip'] = '跳過過場動畫',
         ['binding.map'] = '關閉銀河地圖',
     },

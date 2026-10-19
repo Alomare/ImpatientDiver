@@ -2,6 +2,12 @@
 
 Releases are named "Impatient Diver V&lt;n&gt;" (tag `v<n>`). Each section is that release's notes.
 
+## V8 (2026-10-19)
+
+- Escape closes the galactic map again, instead of Ctrl. New option ESC Closes Galactic Map (On by default); Off leaves Escape to the game.
+- Options reordered: ESC Closes Galactic Map and Ship Walk Speed Boost first, then the skips.
+- Lighter on the game's Lua compiler (the mod runs interpreted).
+
 ## V7 (2026-10-15)
 
 - Added Intro Cinematics (Automatic by default): the Super Earth announcement and the recruitment video never play when the game starts. The title screen starts the way it does when you return to it, and you land straight on the ship. The planet outside can look grey for a short while as it finishes loading.

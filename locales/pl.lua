@@ -19,6 +19,8 @@ return {
         ['option.intro.description'] = 'Komunikat Super Ziemi i film rekrutacyjny przy uruchomieniu gry. Automatycznie: nigdy nie są wczytywane ani odtwarzane. Działa od następnego uruchomienia gry.',
         ['option.shipspeed.label'] = 'Szybszy chód na statku',
         ['option.shipspeed.description'] = 'Twój Helldiver porusza się na pokładzie statku trzy razy szybciej, aż do limitu prędkości samej gry. Misje się nie zmieniają.',
+        ['option.mapesc.label'] = 'ESC zamyka mapę galaktyki',
+        ['option.mapesc.description'] = 'Escape od razu zamyka mapę galaktyki z dowolnego poziomu (misja, operacja, planeta lub sektor). Wył.: Escape cofa o jeden poziom na naciśnięcie, jak w grze. Twój klawisz z Mod Bindings Menu zamyka ją w obu przypadkach.',
         ['binding.skip'] = 'Pomiń przerywnik',
         ['binding.map'] = 'Zamknij mapę galaktyki',
     },

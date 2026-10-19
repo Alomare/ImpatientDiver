@@ -19,6 +19,8 @@ return {
         ['option.intro.description'] = 'ゲーム起動時のスーパーアースの告知と新兵募集のムービー。自動：読み込みも再生もされません。次回のゲーム起動から有効になります。',
         ['option.shipspeed.label'] = '艦船内の移動速度アップ',
         ['option.shipspeed.description'] = '艦船内でヘルダイバーの移動速度が3倍になります（ゲーム本来の速度上限まで）。ミッションには影響しません。',
+        ['option.mapesc.label'] = 'ESCで銀河マップを閉じる',
+        ['option.mapesc.description'] = 'Escキーで、どの階層（ミッション、作戦、惑星、セクター）からでも銀河マップをすぐに閉じます。オフ：ゲーム本来どおり、Escキーを押すたびに1階層戻ります。Mod Bindings Menuのキーではどちらの場合も閉じられます。',
         ['binding.skip'] = 'カットシーンをスキップ',
         ['binding.map'] = '銀河マップを閉じる',
     },

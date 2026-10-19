@@ -11,3 +11,5 @@ research/recon*.lua
 research/test_recon*.py
 # Live test checklists (local only)
 TESTING.md
+# Internal notes and development history
+dev/
