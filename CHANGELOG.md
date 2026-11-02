@@ -2,6 +2,16 @@
 
 Releases are named "Impatient Diver V&lt;n&gt;" (tag `v<n>`). Each section is that release's notes.
 
+## V9 (2026-11-02)
+
+Rebuilt for the current game, which no longer runs LuaJIT: the mod now needs [Chef Shared Loader](https://github.com/Th3chef/Chef-Shared-Loader) 1.5.1 or newer instead of Bingus Shared Loader. Mod loaders list it as Impatient Diver (CSL/EAC).
+
+- Every skip is automatic, set per scene in the F9 menu: Instant (the default), Fast (8x speed) or Off. Each row says what it skips.
+- Works in a squad, as host or client: joining and leaving lobbies, and right after a mission. The drop zoom follows the host's mod. Picking another drop point zooms quickly again.
+- Intro videos are now an install option: the start-up logos too, cut to a third of a second with their sounds silent (English voice line). The title's "press a button" screen stays.
+- Removed, as the game no longer lets a mod reach them: the manual skip key, ESC Closes Galactic Map, Ship Walk Speed Boost. Mod Options Menu, Mod Bindings Menu and the translations went with Bingus Shared Loader: the menu is in English for now.
+- Now under the MIT License.
+
 ## V8 (2026-10-19)
 
 - Escape closes the galactic map again, instead of Ctrl. New option ESC Closes Galactic Map (On by default); Off leaves Escape to the game.

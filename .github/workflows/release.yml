@@ -1,7 +1,7 @@
 # Publishes a GitHub release for each new ZIP pushed to releases/ (see .github/scripts/release.py):
 # releases/<Name>-<n>.zip -> tag v<n>, release "<Name> V<n>", notes from CHANGELOG.md's "## V<n>" section.
-# The ZIPs are built locally (python scripts/build.py <Mod> --release in the workspace), since the build needs the
-# workspace's packager and Bingus Shared Loader's archive tools.
+# The ZIPs are built locally (python -B research/build_release.py --release), since the build needs the workspace's
+# Chef Shared Loader tools, FileDiver and Audiodiver.
 name: Release
 
 on:

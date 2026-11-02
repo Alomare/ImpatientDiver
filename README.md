@@ -2,53 +2,52 @@
 
 # Impatient Diver
 
-A Helldivers 2 Lua mod for [Bingus Shared Loader](https://github.com/CowboyBingus/BingusSharedLoader) that skips the intro videos and the ship's waiting scenes, takes you from the hellpod straight to the loadout, cuts the zoom after you pick a drop location, lets you move faster around the ship and closes the galactic map in one press.
+A Helldivers 2 Lua mod for [Chef Shared Loader](https://github.com/Th3chef/Chef-Shared-Loader) that skips the intro videos and the ship's waiting scenes, and takes you from the hellpod straight to the loadout. Mod loaders list it as Impatient Diver (CSL/EAC).
+
+Since V9 it runs on the game's plain Lua 5.1, without FFI or memory access. V8 and older ran on Bingus Shared Loader and can't run on the current game.
 
 ## Features
 
-- **Intro cinematics:** the Super Earth announcement and the recruitment video when the game starts. The title screen starts the way it does when you return to it, so the videos are never loaded or played. A change to this option takes effect at the next game start.
+- **Intro videos** (an option when you install the mod): the three start-up logos and the two title screen videos last a third of a second, with their sounds silent. The title's "press a button" screen stays.
 - **Log-in ship intro:** the camera flying into the ship and your Helldiver walking to the bridge after you log in.
-- **Cryo pod transition:** your cryo pod rolling in and your Helldiver stepping out when you arrive on a ship. You take control at the pod exit, where the game would put you anyway.
-- **FTL transition:** the FTL jump when the ship travels to another planet and when you join a lobby. Loading still happens; one Manual press while joining a lobby also skips the cryo pod after it.
-- **Hellpod to Loadout:** your Helldiver climbing into the hellpod and the camera moving to the drop location screen. The drop location, the loadout and the launch are untouched.
-- **Drop Location Zoom:** the quick zoom on the map after you pick a drop location; the loadout appears right away.
-- The three cutscenes are each **Off**, **Manual** (spacebar, or a Mod Bindings Menu key) or **Automatic** (the default); Intro Cinematics, Hellpod to Loadout and Drop Location Zoom are **Off** or **Automatic** (the default).
-- **Ship Walk Speed Boost:** your Helldiver moves three times as fast aboard the ship (walking, jogging, sprinting, crouched), up to the game's own 10 m/s speed limit. Missions are untouched. **Off** (the default) or **On**.
-- **ESC Closes Galactic Map:** Escape closes the galactic map at once from any level (mission, operation, planet or sector). **On** (the default) or **Off** (Escape backs out one level per press, as in the game). A "Close galactic map" key can also be set in Mod Bindings Menu (for example a gamepad button); it works either way. Both are ignored while you type in the chat.
-- Settings in [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) (escape menu > MODS > Impatient Diver), applied at once: ESC Closes Galactic Map and Ship Walk Speed Boost first, then the skips. Without it every feature is at its default.
-- Texts follow the game's Text Language.
-- Everything happens on your game only: teammates don't need the mod.
+- **Cryo pod transition:** your cryo pod rolling in and your Helldiver stepping out when you arrive on a ship.
+- **FTL transition:** the FTL jump when the ship travels to another planet, and the shots of the ship when you join or leave a lobby. Loading still takes its time.
+- **Hellpod to Loadout:** your Helldiver climbing into the hellpod and the camera moving to the drop location map.
+- **Drop Location Zoom:** the zoom after you pick a drop point, also when you go back to the map and pick another one. In a squad only the host can speed it up: everyone's zoom follows the host's.
+
+Each scene is a row in the F9 menu: **Instant** (the default), **Fast** (8x speed) or **Off**. Texts are in English.
+
+Scenes are only sped up while the mod recognises them. Never in a mission, in the hellpod launch or in the return from a mission.
 
 ## Installation
 
-1. Install [Bingus Shared Loader](https://www.nexusmods.com/helldivers2/mods/16292) (v17 or newer).
-2. Optional: [Mod Options Menu](https://www.nexusmods.com/helldivers2/mods/16625) to change the settings, and [Mod Bindings Menu](https://www.nexusmods.com/helldivers2/mods/16478) for a skip key other than spacebar.
-3. Install the ZIP from [Releases](https://github.com/Alomare/ImpatientDiver/releases) with [HD2 Arsenal](https://www.nexusmods.com/helldivers2/mods/4664) (or HD2 Mod Manager) and deploy. Keep Bingus Shared Loader last in the mod order, so it loads first.
+1. Install the latest [Chef Shared Loader](https://www.nexusmods.com/helldivers2/mods/17760) (1.5.1 or newer) and keep it at the top priority.
+2. Install the ZIP from [Releases](https://github.com/Alomare/ImpatientDiver/releases) with [HD2 Arsenal](https://www.nexusmods.com/helldivers2/mods/4664) (or HD2 Mod Manager) and deploy. Remove V8 or older first if you still have one.
 
-The verdict is the first line of `%LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ImpatientDiver_STATUS.log`.
+The log is `%APPDATA%\Arrowhead\Helldivers2\ImpatientDiver.log`.
+
+## Known limits
+
+- **Voice languages.** The silent intro covers the English voice line. With another voice language installed, the title video's line still plays over a black screen until you press a key. Untick the Intro videos option if you prefer the full videos.
+- **Game updates.** The Intro videos option carries a copy of three of the game's sound banks, as of the build it was made for. If an update changes them, untick the option until there's a new version.
+- **Squadmates** may see your Helldiver leave the cryo pod early. They don't need the mod.
+- **Picking a drop point again right after going back to the map:** while the camera is still moving back, the zoom plays at normal speed.
 
 ## Technical Details
 
-- **Cutscenes.** The ship sequences are scenes run by the game's cutscene manager, which keeps the previous, current and queued scene ids. The mod reads the current scene each frame and maps ids to names through the game's own id-to-name table, so a new or renumbered scene can't be mistaken for one it skips.
-- **Fast-forward, not abort.** Each scene waits on timers: a phase ends when the scene clock passes a stamp plus a fixed wait. The mod moves the running phase's stamp back so the game's own update changes phase, with everything that phase change normally does (placing the Helldiver at the pod exit, restoring control). Aborting the scene instead left cinematic state behind that crashed the next hellpod launch. Loading waits are never skipped. During the FTL scenes the screen fader is held clear.
-- **Hellpod to Loadout.** Climbing into the hellpod is a seat transition: the local Helldiver's seat record steps through a node graph, each step waiting until the scene clock passes a deadline. On the ship, when the seat starts moving into one of the ship's hellpods, the mod moves each deadline to now, so the game runs every step and the seat completion itself; the Hellpod briefing that opens then waits 2 s on a timer before building the drop location screen, which the mod expires. Leaving the hellpod and every other seat are left alone.
-- **Drop Location Zoom.** Picking a drop point sets the loadout screen's zoom target to 1, and the screen opens its loadout page once the drop group's zoom progress, which moves toward the target at 1 per second, reaches it. The mod sets that progress to 1 right after the pick, so the game opens the loadout page itself; going back to the map is left alone.
-- **Galactic map.** The map is the game's Hologram menu presenter. Each presenter has a close request that the presenter manager checks every frame; on Escape (or the Mod Bindings Menu key) the mod sets the map's, so the game closes it (and pops its screen) the way it does itself.
-- **Intro cinematics.** The title screen has its own no-intro start, used when you return to it: its start reads a flag of the game's that no other code reads, and with it set the title screen never builds its video player, so the announcement and the recruitment video are never queued. The mod sets that flag before the title screen starts and puts it back once it has. If the mod comes in after the title screen has started, it sets the title screen's own no-intro byte instead, before the videos are queued.
-- **Ship walk speed boost.** The movement update takes each speed (walk, jog, sprint, crouched, prone) from the Helldiver's movement record. A Helldiver spawned with its own settings gets a private copy of that record, and the ship's Helldiver always does (the ship sets its own walk and jog speeds). On the ship, the mod triples the speeds in the local Helldiver's private copy, up to the cap the movement code applies (10 m/s); the shared record, other players' Helldivers and mission Helldivers are never touched. The speeds are put back when the Helldiver leaves the ship or the option is turned off, and a record the game makes again is boosted again.
-- **Finding the game's code.** Every global, structure offset and timer wait comes from code signatures ('??' wildcards) in game.dll, generated in one block by `research/signatures.py` from a game.dll dump and checked to match exactly once. At startup each is tried at the known build's address, else game.dll's executable sections are searched over a few frames; values are read from the matched instructions (rip-relative operands, displacements, immediates), and a value used by several signatures must agree. What can't be found turns off only the feature that needs it. The search engine (`tools/sigscan.lua` in the author's workspace) is shared with the author's other mods.
-- **Texts.** `locales/en.lua` is the English source and `locales/<tag>.lua` the bundled translations, resolved by CowboyBingus' `src/bingus_text.lua` against the game's Text Language; the build places both ahead of the script. Option and binding texts are passed to Mod Options Menu v1.1 / Mod Bindings Menu v2.1 as functions, so they follow language changes.
-- **Memory access.** Reads and writes go through `ReadProcessMemory` / `WriteProcessMemory` on the game's own process, which fail instead of crashing on a bad address. Every mod shares one LuaJIT FFI namespace, where a function name keeps its first declaration, so the Windows functions are declared under the mod's own names (`imd_ReadProcessMemory`... bound to the exports with `__asm__`): another mod's declaration of the same functions can't change the mod's calls.
-- **Tests.** `tests/test_release.py` runs the built entry under LuaJIT against a game.dll dump (not included), with the cutscene manager, clock, fader, presenter manager, hellpod seats, title screen and private movement records simulated, and another mod's declarations of the Windows functions made first.
+- **Speed.** Scenes go through the engine's own clock: `Application.set_time_step_policy('external_multiplier', 8)` for Fast, and one `'jump'` of 1 s a frame for Instant, up to a budget per scene, then 8x for what is left. The game ends each scene itself, so your Helldiver is placed and control comes back as always.
+- **Telling the scenes apart.** The mod reads no game memory: it recognises scenes from what the engine's Lua API shows: which worlds exist and what they hold, the main camera, and the Helldiver's animation state.
+- **The intro patch** is a data patch, built with Audiodiver's core and FileDiver.
+- **Tests.** `tests/test_release.py` runs the script under Lua 5.1 with a fake loader and engine; `tests/mutate.py` checks that the tests catch each guard being removed.
 
-How it works in the game's code: [RESEARCH.md](RESEARCH.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
+How it works in the game: [RESEARCH.md](RESEARCH.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Release notes: [CHANGELOG.md](CHANGELOG.md).
 
 ## Credits
 
-- Built on [Bingus Shared Loader](https://github.com/CowboyBingus/BingusSharedLoader), [Mod Options Menu](https://github.com/CowboyBingus/ModOptionsMenu) and [Mod Bindings Menu](https://github.com/CowboyBingus/ModBindingsMenu) by CowboyBingus, whose `bingus_text.lua` provides the translations.
-- Uses research from HD2Runtime by SkyeShade, https://github.com/SkyeShade/HD2Runtime: the Helldiver's speed fields and the ship Helldiver's own record that Ship Walk Speed Boost changes.
+- Runs on [Chef Shared Loader](https://github.com/Th3chef/Chef-Shared-Loader) by Th3chef.
 - Developed with Claude Opus 5.5 and the [HD2 Lua Mod Skill](https://github.com/MrChengl11/hd2-lua-mod-skill).
+- Game data read with [FileDiver](https://github.com/xypwn/filediver).
 
 ## License
 
-Copyright (C) 2026 Alomare. Licensed under the [GNU General Public License v3.0 or later](LICENSE): you're free to use, study, change and share this mod, and anything you distribute that includes or changes its code must use the same license and come with its source. `src/bingus_text.lua` is CowboyBingus's, under the Zero-Clause BSD license.
+Copyright (c) 2026 Alomare. Licensed under the [MIT License](LICENSE). V8 and older were released under the GPL-3.0-or-later and stay available under it.

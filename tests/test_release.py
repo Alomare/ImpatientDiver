@@ -1,1428 +1,1234 @@
-"""Offline test of the release script under LuaJIT, with the real game.dll code as fake process memory.
-
-The Ghidra-ready dump (_research/game_25480438.dll, offsets == RVAs) is mapped at a fake base, so the
-signatures, rip-relative targets and the scene-name table are checked against the game's own code; only
-the heap objects (cutscene manager, clock, fader, presenter manager) and the per-frame scene update are simulated.
-
-Run from the mod folder:  python -B tests/test_release.py
-"""
-import re
+"""Offline test of skip_intro_animation.lua under Lua 5.1 (lupa), with a fake Chef Shared Loader and engine: when the
+mod speeds the game up by itself (Fast and Instant), and when it must not. Needs only Python with lupa.
+python -B tests/test_release.py"""
+import os
 import sys
-import tempfile
-from pathlib import Path
 
-from lupa.luajit21 import LuaRuntime
+import lupa.lua51 as lupa
 
-MOD = Path(__file__).resolve().parent.parent
-ROOT = MOD.parents[1]
-MAIN = (MOD / 'skip_intro_animation.lua').read_text(encoding='utf-8')
-DUMP = ROOT / '_research' / 'game_25480438.dll'
-sys.path.insert(0, str(MOD / 'research'))
-sys.path.insert(0, str(ROOT / 'tools'))
-import signatures  # noqa: E402
-import sigspec  # noqa: E402
-from entry import entry_text  # noqa: E402
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = open(os.path.join(ROOT, 'skip_intro_animation.lua'), encoding='utf-8').read()
 
-SOURCE = entry_text(MOD, 'skip_intro_animation.lua')  # what ships: the texts ahead of the script
-ROWS = {name: (rva, text_, fields) for name, rva, text_, fields, _ in sigspec.build(signatures.SPECS)}
-
-HARNESS = r'''
-local logdir, image = ...
-local real_ffi = require('ffi')
-local ffi = real_ffi
-BASE = 0x40000000
-MGR, CLK, FB, UI, HOLO = 0x20000000, 0x21000000, 0x22000000, 0x23000000, 0x24000000
-GAME, REQ = 0x25000000, 0x26000000
-
-fake = {space = false, menu = false, calls = {}, frame = 0}
--- Like loader-v17: only [%w_-]+.log names, opened for writing (truncated).
-CowboyBingusModLoader = {api = 1, open_log = function(name)
-    if type(name) ~= 'string' or not name:match('^[%w_-]+%.log$') then return nil end
-    return io.open(logdir .. '/' .. name, 'w')
-end}
-
--- Memory: the game.dll image with patches on top, plus small heap blobs.
-local patches, heap = {}, {}
-local function le64(v) return ffi.string(ffi.new('uint64_t[1]', v), 8) end
-local function le32(v) return ffi.string(ffi.new('uint32_t[1]', v), 4) end
-local function f32(v) return ffi.string(ffi.new('float[1]', v), 4) end
-fake.le64, fake.le32, fake.f32 = le64, le32, f32
-local function read_mem(a, n)
-    if a >= BASE and a + n <= BASE + #image then
-        local s = image:sub(a - BASE + 1, a - BASE + n)
-        for _, p in ipairs(patches) do
-            local lo, hi = math.max(a, p[1]), math.min(a + n, p[1] + #p[2])
-            if lo < hi then
-                s = s:sub(1, lo - a) .. p[2]:sub(lo - p[1] + 1, hi - p[1]) .. s:sub(hi - a + 1)
-            end
-        end
-        return s
-    end
-    for k, v in pairs(heap) do
-        if k <= a and a + n <= k + #v then return v:sub(a - k + 1, a - k + n) end
-    end
+FAKE = r'''
+local T = { now = 0, keys = {}, mouse = {}, players = 1, host = true, mission = false, policy = {}, mult = 1, jump = 0,
+            log = {}, notes = {}, asked_sm = {}, rows = {}, specs = {}, changed = {}, session = 'session',
+            sync = 'sync', owner = { [1] = 'me' } }
+local RUNTIME, CAMERA, DIVER = '46cab355bd8d4d37', '465f4895f3dc98d1', '4d1c334d294dfa97'
+T.CANNON = '26ef7da30b82246d'
+local meta = { __tostring = function(u) return "[Unit '#ID[" .. u.kind .. "]']" end }
+function T.unit(kind, extra)
+  local u = setmetatable({ kind = kind, alive = true }, meta)
+  for k, v in pairs(extra or {}) do u[k] = v end
+  return u
 end
-local function write_mem(a, bytes)
-    if a >= BASE and a < BASE + #image then patches[#patches + 1] = {a, bytes}; return true end
-    for k, v in pairs(heap) do
-        if k <= a and a + #bytes <= k + #v then
-            heap[k] = v:sub(1, a - k) .. bytes .. v:sub(a - k + #bytes + 1)
-            return true
-        end
-    end
-    return false
+function T.camera(x, y, z, fov) return T.unit(CAMERA, { cam = { x = x, y = y, z = z, fov = fov, f = { x = 0, y = 1, z = 0 } } }) end
+-- goid: its game object; pos: where it stands
+function T.diver(state, goid, x, y) return T.unit(DIVER, { anim = state, goid = goid, pos = { x = x or 0, y = y or 0, z = 0 } }) end
+function T.world(units) return { units = units or {}, time = 0 } end
+function T.fill(w, kind, n) for _ = 1, n do w.units[#w.units + 1] = T.unit(kind) end end
+function T.empty(w) for _, u in ipairs(w.units) do u.alive = false end; w.units = {} end
+function T.keep(w, n)   -- the first n units stay
+  for i = #w.units, n + 1, -1 do w.units[i].alive = false; w.units[i] = nil end
 end
-fake.patch = function(rva, bytes) patches[#patches + 1] = {BASE + rva, bytes} end
-fake.heap = function(a, bytes) heap[a] = bytes end
-fake.read = read_mem
-fake.write = write_mem
-fake.reads = 0
-
--- The Windows functions, by their export names (fake.no_game: game.dll isn't loaded).
-local k32 = {
-    GetCurrentProcess = function() return nil end,
-    GetCurrentProcessId = function() return 1234 end,
-    GetModuleHandleA = function(name) if fake.no_game then return nil end return ffi.cast('void *', BASE) end,
-    ReadProcessMemory = function(p, addr, buf, size, got)
-        fake.reads = fake.reads + 1
-        local s = read_mem(tonumber(ffi.cast('uint64_t', addr)), tonumber(size))
-        if not s then return 0 end
-        ffi.copy(buf, s, #s); got[0] = #s; return 1
-    end,
-    WriteProcessMemory = function(p, addr, buf, size, got)
-        local ok = write_mem(tonumber(ffi.cast('uint64_t', addr)), ffi.string(buf, tonumber(size)))
-        if not ok then return 0 end
-        got[0] = size; return 1
-    end,
-}
--- The libraries as FFI sees them (as One Click Armor Set's harness): a call goes through the C declaration of the name
--- it is made by (the shared namespace keeps the first one; a later ffi.cdef of the name fails), so its arguments are
--- converted, or refused, as in the game. The stand-ins are called back through that declaration (JIT off: a callback
--- can't run under a compiled C call).
-require('jit').off()
-local declared, callbacks = {}, {}
-local function cdef(text)
-    real_ffi.cdef(text)
-    local ret, name, params, rest = text:match('^%s*([^;(]-)%s*([%w_]+)%s*(%b())%s*([^;]*);%s*$')
-    if name and not declared[name] then
-        declared[name] = {type = ret .. '(*)' .. params, symbol = rest:match('__asm__%("([%w_]+)"%)') or name}
-    end
-end
-local library = setmetatable({}, {__index = function(_, name)
-    local d = assert(declared[name], 'missing declaration for symbol ' .. name)
-    callbacks[name] = callbacks[name] or real_ffi.cast(d.type, assert(k32[d.symbol], 'no stand-in for ' .. d.symbol))
-    return callbacks[name]
-end})
-package.loaded.ffi = setmetatable({load = function() return library end, cdef = cdef}, {__index = real_ffi})
--- Another mod loaded first declared the Windows functions under their own names, with other types (a player's log,
--- 2026-10-10, One Click Armor Set): a call through these names would be converted, or refused, by their types.
-for _, decl in ipairs({'uintptr_t GetCurrentProcess(void);', 'uintptr_t GetModuleHandleA(const char *name);',
-                       'int ReadProcessMemory(uintptr_t process, uintptr_t address, uintptr_t buffer, size_t size, '
-                           .. 'size_t *read);',
-                       'int WriteProcessMemory(uintptr_t process, uintptr_t address, const char *buffer, size_t size, '
-                           .. 'size_t *written);',
-                       'uint64_t GetCurrentProcessId(void);', 'int GetAsyncKeyState(uintptr_t key);'}) do
-    cdef(decl)
-end
-
--- The engine keyboard: spacebar 44, Escape 27 (both names), left Ctrl 29 and right Ctrl 157 (which the mod must not use).
-local KEY_IDS = {space = 44, ['left ctrl'] = 29, ['right ctrl'] = 157, esc = 27, escape = 27}
+os.clock = function() return T.now end
 stingray = {
-    Keyboard = {button_id = function(n) return KEY_IDS[n] end,
-                pressed = function(id)
-                    return (id == 44 and fake.space) or (id == 29 and fake.ctrl) or (id == 157 and fake.rctrl)
-                           or (id == 27 and fake.escape) or false
-                end},
-}
--- Mod Options Menu v1.0.1's API, validating specs by its rules (mod_options_menu.lua new_option).
-fake.values, fake.options, fake.callbacks = {}, {}, {}
-local function plain(v, limit) return type(v) == 'string' and v:gsub('%c', ' '):match('%S') ~= nil and #v <= limit end
-fake.option_menu = {api = 1,
-    register_option = function(id, spec)
-        if type(id) ~= 'string' or id == '' or #id > 96 or id:find('%c') or not plain(spec.label, 64) then
-            return false, 'invalid option registration'
-        end
-        if spec.mod ~= nil and not plain(spec.mod, 40) then return false, 'invalid mod name' end
-        if spec.description ~= nil and not plain(spec.description, 400) then return false, 'invalid description' end
-        if spec.type == 'toggle' then
-            if spec.default ~= nil and type(spec.default) ~= 'boolean' then return false, 'invalid default' end
-            fake.options[id] = spec
-            return true
-        end
-        if spec.type ~= 'choice' or #spec.choices < 2 or #spec.choices > 16 then return false, 'bad choices' end
-        for _, c in ipairs(spec.choices) do if not plain(c, 48) then return false, 'invalid choice name' end end
-        local d = spec.default or 1
-        if type(d) ~= 'number' or d % 1 ~= 0 or d < 1 or d > #spec.choices then return false, 'invalid default' end
-        fake.order = fake.order or {}
-        fake.order[#fake.order + 1] = id:match('[^.]+$') .. (spec.gap and ' (gap)' or '')
-        fake.options[id] = spec
-        return true
+  Application = {
+    worlds = function() local out = {} for i, w in ipairs(T.worlds) do out[i] = w end return out end,
+    main_world = function() return T.main end,
+    set_time_step_policy = function(kind, v)
+      T.policy[#T.policy + 1] = { kind, v }
+      if kind == 'external_multiplier' then T.mult = v end
+      if kind == 'jump' then T.jump = T.jump + v end   -- in the next frame's step
     end,
-    get = function(id)
-        if not fake.options[id] then return nil end
-        local v = fake.values[id:match('[^.]+$')]
-        if v == nil then v = fake.options[id].default end
-        if v == nil then v = fake.options[id].type == 'toggle' and false or 1 end
-        return v
+    build = function() return 'release' end,
+    build_identifier = function() return 'test' end,
+  },
+  World = {
+    units = function(w) local out = {} for i, u in ipairs(w.units) do out[i] = u end return out end,
+    num_units = function(w) return #w.units end,
+    time = function(w) return w.time end,
+    delta_time = function(w) return 1 / 60 end,
+    units_by_resource = function(w, id)
+      assert(type(id) == 'table' and id.hex, 'units_by_resource without an IdString64')
+      local out = {}
+      for _, u in ipairs(w.units) do if u.kind == id.hex then out[#out + 1] = u end end
+      return out
     end,
-    on_change = function(id, fn) fake.callbacks[id] = fn; return true end,
+  },
+  IdString64 = { from_hex = function(h) return { hex = h } end },
+  Unit = {
+    alive = function(u) return u.alive end,
+    num_cameras = function(u)
+      assert(u.kind ~= RUNTIME, 'asked a runtime-built unit for cameras')
+      assert(u.alive, 'asked a dead unit for cameras')
+      return u.cam and 1 or 0
+    end,
+    camera = function(u, i) assert(u.alive and i == 1, 'camera of a dead unit'); return u.cam end,
+    has_animation_state_machine = function(u)
+      assert(u.alive, 'asked a dead unit'); T.asked_sm[u] = true; return u.anim ~= nil
+    end,
+    animation_get_state = function(u)
+      assert(u.alive and u.anim and T.asked_sm[u], 'animation_get_state without a state machine (an engine assert)')
+      return unpack(u.anim)
+    end,
+  },
+  Camera = {
+    world_position = function(c) return c end,
+    vertical_fov = function(c) return c.fov end,
+    world_rotation = function(c) return c.f end,
+  },
+  Quaternion = { forward = function(q) return q end },
+  Vector3 = { to_elements = function(v) return v.x, v.y, v.z end },
+  Network = { game_session = function() return T.session end, peer_id = function() return 'me' end },
+  GameSession = {
+    unit_synchronizer = function(s) assert(s == 'session', 'unit_synchronizer without the session'); return T.sync end,
+    game_object_owner = function(s, id)
+      assert(s == 'session' and type(id) == 'number', 'game_object_owner without the session and an id')
+      return T.owner[id]
+    end,
+  },
+  UnitSynchronizer = {
+    unit_to_game_object_id = function(sync, u) assert(sync == 'sync', 'no synchronizer'); return u.goid end,
+  },
 }
-ModOptionsMenu = fake.option_menu
-function fake.apply(short, value)  -- the player applies a change in the MODS tab
-    fake.values[short] = value
-    local id = 'alomare.skip_intro_animation.' .. short
-    if fake.callbacks[id] then fake.callbacks[id](value, id) end
-end
--- Mod Bindings Menu: the skip binding is fake.bound / fake.menu, the map binding fake.map_bound / fake.map_key.
-local function bind(id, text) if id:match('%.map$') then fake.map_bound = id .. '|' .. text else fake.bound = id .. '|' .. text end end
-fake.bind = bind
-ModBindingsMenu = {api = 1, register_binding = function(id, label) bind(id, label); return true end,
-                   is_down = function(id) if id:match('%.map$') then return fake.map_key end return fake.menu end}
-update = function(dt) fake.base_updates = (fake.base_updates or 0) + 1 end
-
--- Globals the mod finds in the image: point them at simulated objects.
-fake.patch(0x346d530, le64(MGR))
-fake.patch(0x3326348, le64(CLK))
-fake.patch(0x347cda8, le64(FB))
-fake.heap(MGR + 0x1900, string.rep('\0', 0x20))
-fake.heap(MGR + 0x60, string.rep('\0', 0xa0))
-fake.heap(CLK, string.rep('\0', 0x20))
-fake.heap(FB + 0x128 + 0x780, string.rep('\0', 0x30))
--- The presenter manager (UI state + 0x4288): current presenter +0xc, close requests from +0xd8 (Hologram at +0x98).
-fake.patch(0x347ce28, le64(UI))
-fake.heap(UI + 0x4280, string.rep('\0', 0x200))
-fake.heap(HOLO, string.rep('\0', 0x18))
-write_mem(UI + 0x4288 + 0xd8 + 0x98, le64(HOLO))
-function fake.set_presenter(id) write_mem(UI + 0x4288 + 0xc, le32(id)) end
--- The HUD [0x346d538]: its chat widget at +0x14498, whose byte +0x139b8 is set while the chat's text input is open.
-HUD = 0x33000000
-fake.patch(0x346d538, le64(HUD)); fake.heap(HUD + 0x14498 + 0x139b0, string.rep('\0', 0x10))
-function fake.chat(open) write_mem(HUD + 0x14498 + 0x139b8, open and '\1' or '\0') end
-function fake.close_request() return read_mem(HOLO + 0x10, 1):byte() end
-function fake.clear_request() write_mem(HOLO + 0x10, '\0') end
--- MissionEnd (13) and MissionSummary (23): their close requests at [collection + 0x88] / [collection + 0xd8]; the
--- presenter manager closes the current menu when its request is set (as game.dll 0x14bf750).
-local MENU_SLOT = {[13] = 0x88, [23] = 0xd8}
-fake.heap(REQ, string.rep('\0', 0x100))
-function fake.open_menu(id)
-    write_mem(REQ + MENU_SLOT[id], '\0')
-    write_mem(UI + 0x4288 + 0xd8 + MENU_SLOT[id], le64(REQ + MENU_SLOT[id]))
-    write_mem(UI + 0x4288 + 0xc, le32(id)); write_mem(UI + 0x4288 + 0x14, le32(id)); write_mem(UI + 0x4288 + 0x28, le32(1))
-end
-function fake.menu_open(id)
-    local v = ffi.new('uint32_t[1]'); ffi.copy(v, read_mem(UI + 0x4288 + 0xc, 4), 4); return tonumber(v[0]) == id
-end
-function fake.menu_update()
-    for id, slot in pairs(MENU_SLOT) do
-        if fake.menu_open(id) and read_mem(REQ + slot, 1):byte() == 1 then
-            fake.calls[#fake.calls + 1] = 'close menu ' .. id
-            write_mem(UI + 0x4288 + 0xc, le32(0)); write_mem(UI + 0x4288 + 0x28, le32(0))
-        end
-    end
-end
--- The game state (game global + 0xac21c).
-fake.patch(0x3326340, le64(GAME))
-fake.heap(GAME + 0xac210, string.rep('\0', 0x20))
-function fake.set_game_state(v) write_mem(GAME + 0xac21c, le32(v)) end
-
-function fake.set_scene(current, phase)
-    write_mem(MGR + 0x1908, le32(0) .. le32(current) .. le32(0))
-    write_mem(MGR + 0x60, le32(phase or 1))
-end
-function fake.scene()
-    local s = read_mem(MGR + 0x1908, 8); local v = ffi.new('uint32_t[2]'); ffi.copy(v, s, 8)
-    local p = ffi.new('uint32_t[1]'); ffi.copy(p, read_mem(MGR + 0x60, 4), 4)
-    return tonumber(v[1]), tonumber(p[0])
-end
-function fake.stamp(off)
-    local v = ffi.new('uint64_t[1]'); ffi.copy(v, read_mem(MGR + 0x60 + off, 8), 8); return tonumber(v[0])
-end
-function fake.set_stamp(off, v) write_mem(MGR + 0x60 + off, le64(v)) end
-function fake.now() local v = ffi.new('uint64_t[1]'); ffi.copy(v, read_mem(CLK + 0x18, 8), 8); return tonumber(v[0]) end
-function fake.set_now(v) write_mem(CLK + 0x18, le64(v)) end
-function fake.fader(alpha, target)
-    write_mem(FB + 0x128 + 0x784, f32(0.25) .. string.rep('\0', 12) .. f32(alpha) .. f32(0) .. f32(0.5) .. f32(target))
-end
-function fake.fade()
-    local v = ffi.new('float[2]'); ffi.copy(v, read_mem(FB + 0x128 + 0x794, 4), 4); ffi.copy(v + 1, read_mem(FB + 0x128 + 0x7a0, 4), 4)
-    return string.format('%.2f/%.2f', v[0], v[1])
-end
-
--- The scenes' own per-frame update (as game.dll 0x117d830/0x1177e80): timed phases change when due.
-local PLANS = {
-    [13] = {timers = {[2] = {0x90, 1500000}, [3] = {0x88, 7500000}, [4] = {0x88, 0x8235}}, final = 5},
-    [12] = {timers = {[3] = {0x88, 0x33a025}}, final = 4, next = 11, start = 2},
-    [11] = {timers = {[2] = {0x88, 0x61e91a}}, final = 3},
-    [15] = {timers = {[3] = {0x88, 5000000}}, final = 4},
-    [7] = {timers = {[1] = {0x88, 3000000}, [2] = {0x88, 0x51615}}, final = 3, next = 3, start = 2},
-    [3] = {timers = {[2] = {0x88, 2000000}, [3] = {0x88, 0x1312d0}, [4] = {0x88, 0x1ab3f0}, [5] = {0x88, 2500000},
-                     [6] = {0x88, 1000000}, [7] = {0x88, 1500000}, [8] = {0x88, 1000000}, [9] = {0x88, 1000000},
-                     [10] = {0x88, 1000000}, [11] = {0x88, 2000000}, [12] = {0x88, 2000000}}, final = 13},
-    -- Mission extraction (not skipped any more): phase 1 1 s; its other phases are left out.
-    [1] = {timers = {[1] = {0x88, 1000000}}, final = 2},
-    -- Mission return (never skipped): menus opened on a phase change (opens) or inside a phase (open_in); `menu`
-    -- waits for it to close.
-    [9] = {timers = {[1] = {0x88, 0x590275}, [2] = {0x88, 0x65b9aa, opens = 13}, [3] = {0x88, 0xcb735, menu = 13}},
-           final = 4},
-    [8] = {timers = {[1] = {0x88, 0x196e6a, open_in = 13, menu = 13}}, final = 2},
+-- the F9 menu: T.rows holds each row's value (a saved one set before the mod loads, else its default)
+function T.set(id, v) T.rows[id] = v; if T.changed[id] then T.changed[id](v) end end
+local chef = {
+  api = 3, loader_version = '1.2.3',
+  has = function(n) return true end,
+  own_log = function(n) T.own_log = n return true end,
+  log = function(f, ...) T.log[#T.log + 1] = string.format(f, ...) end,
+  notify = function(t) T.notes[#T.notes + 1] = t end,
+  key_pressed = function(k) return T.keys[k] == true end,
+  mouse_down = function(b) return T.mouse[b] == true end,
+  in_mission = function() return T.mission end,
+  players = function() return T.players end,
+  is_host = function() return T.host end,
+  unit_position = function(u)
+    assert(u.kind ~= RUNTIME, 'asked a runtime-built unit where it is')
+    if u.alive and u.pos then return u.pos.x, u.pos.y, u.pos.z end
+  end,
+  on = function() return function() end end,
+  title = function(t) T.title = t end,
+  option = function(id, spec)
+    assert(spec.type == 'choice' and #spec.choices == 3 and spec.choices[spec.default], 'a row Chef would refuse')
+    T.specs[id] = spec
+    if T.rows[id] == nil then T.rows[id] = spec.default end
+    return T.rows[id]
+  end,
+  get = function(id) return T.rows[id] end,
+  on_change = function(id, fn) T.changed[id] = fn; return true end,
+  call = function(name, ...)
+    local tbl, fn = name:match('^(%w+)%.([%w_]+)$')
+    return stingray[tbl][fn](...)
+  end,
 }
-function fake.game_update()
-    fake.menu_update()
-    local current, phase = fake.scene()
-    local plan = PLANS[current]
-    local tm = plan and plan.timers[phase]
-    if fake.frozen and fake.restamp then fake.set_stamp(0x88, fake.now()) end
-    if fake.frozen or not tm then return end
-    if tm[1] and fake.stamp(tm[1]) + tm[2] > fake.now() then return end
-    if tm.open_in and fake.opened ~= current then fake.opened = current; fake.open_menu(tm.open_in); return end
-    if tm.menu and fake.menu_open(tm.menu) then return end
-    if tm.until_ and not fake[tm.until_] then return end
-    fake.calls[#fake.calls + 1] = string.format('update %d %d->%d', current, phase, phase + 1)
-    write_mem(MGR + 0x60, le32(phase + 1))
-    if not plan.keep88 then fake.set_stamp(0x88, fake.now()) end
-    fake.set_stamp(0x90, fake.now())
-    if tm.opens then fake.open_menu(tm.opens) end
-    if phase + 1 == plan.final then fake.opened = nil; fake.set_scene(plan.next or 0, plan.start or 1) end
-end
-
--- Hellpod entry. The local Helldiver: the player manager (+0x88 active, +0x3a8 avatar reference), resolved through
--- the entity manager's reference map (+0xf22ec8 buckets, +0xf22ed0 capacity, +0xf22ed4 empty, +0xf22ed8 multiplier)
--- to the id at manager + 0x1e65e4 * 8 + index * 24. Its seat: the seater component's map (+0x20 .. +0x30) and 64-byte
--- records (+0x48). The ship's hellpods: the hellpod manager's count (+8) and entity pointers (+0x68, id at +8).
-PLAYERS, EM, SEATS, SEATMAP, RECS = 0x27000000, 0x28000000, 0x29000000, 0x29100000, 0x29200000
-PODS, POD1, POD2 = 0x2a000000, 0x2a100000, 0x2a200000
-STK, SCR = 0x2b000000, 0x2c000000
-AVATAR, REF, MULT = 0xa0a0, 0x1234, 0x9E3779B1
-fake.POD1, fake.POD2 = 0xb0b1, 0xb0b2
-local function slot_of(key, cap) return tonumber(ffi.cast('uint32_t', ffi.new('uint64_t', MULT) * key)) % cap end
-fake.patch(0x3326468, le64(PLAYERS)); fake.heap(PLAYERS, string.rep('\0', 0x400))
-write_mem(PLAYERS + 0x88, le32(1)); write_mem(PLAYERS + 0x3a8, le32(REF))
-fake.patch(0x346bf98, le64(EM))
-EMAP = EM + 0xf22ec0 + 0x1000
-fake.heap(EM + 0xf22ec0, string.rep('\0', 0x40)); fake.heap(EMAP, string.rep('\0', 8 * 8))
-write_mem(EM + 0xf22ec8, le64(EMAP) .. le32(8) .. le32(0xffffffff) .. le32(MULT))
-for i = 0, 7 do write_mem(EMAP + i * 8, le32(0xffffffff) .. le32(0)) end
-write_mem(EMAP + slot_of(REF, 8) * 8, le32(REF) .. le32(2))
-fake.heap(EM + 0x1e65e4 * 8, string.rep('\0', 24 * 4)); write_mem(EM + 0x1e65e4 * 8 + 2 * 24, le32(AVATAR))
-fake.patch(0x3326d78, le64(SEATS)); fake.heap(SEATS, string.rep('\0', 0x60))
-fake.heap(SEATMAP, string.rep('\0', 8 * 8)); fake.heap(RECS, string.rep('\0', 0x40 * 4))
-write_mem(SEATS + 0x20, le64(SEATMAP) .. le32(8) .. le32(0xffffffff) .. le32(MULT)); write_mem(SEATS + 0x48, le64(RECS))
-for i = 0, 7 do write_mem(SEATMAP + i * 8, le32(0xffffffff) .. le32(0)) end
-write_mem(SEATMAP + slot_of(AVATAR, 8) * 8, le32(AVATAR) .. le32(1))
-REC = RECS + 0x40
-fake.patch(0x3326428, le64(PODS)); fake.heap(PODS, string.rep('\0', 0x80))
-fake.heap(POD1, string.rep('\0', 0x10)); fake.heap(POD2, string.rep('\0', 0x10))
-write_mem(PODS + 8, le32(2)); write_mem(PODS + 0x68, le64(POD1) .. le64(POD2))
-write_mem(POD1 + 8, le32(fake.POD1)); write_mem(POD2 + 8, le32(fake.POD2))
--- The loadout screen: the screen stack (type at +0, screen at +0xb0), the intro timer (+0x273988) and phase (+0x27398c).
-fake.patch(0x347ce38, le64(STK)); fake.heap(STK, string.rep('\0', 0xc0)); fake.heap(SCR + 0x273980, string.rep('\0', 0x50))
-local function u32_at(a) local v = ffi.new('uint32_t[1]'); ffi.copy(v, read_mem(a, 4), 4); return tonumber(v[0]) end
-local function f32_at(a) local v = ffi.new('float[1]'); ffi.copy(v, read_mem(a, 4), 4); return tonumber(v[0]) end
-fake.u32_at = u32_at
--- A seat move as the seater update runs it (game.dll 0x639b40): each step waits until the clock reaches the record's
--- deadline (+0x28), then the next one starts 1 s later; after the last, the seat is reached (moving +0x30 cleared,
--- target +0x18 = -1) and, for a hellpod, the briefing opens with its 2 s intro (as the seat completion does).
-function fake.seat_move(collection, steps)
-    write_mem(REC, le32(collection)); write_mem(REC + 0x18, le32(5)); write_mem(REC + 0x30, '\1')
-    write_mem(REC + 0x28, le64(fake.now() + 1000000))
-    fake.seat_steps, fake.seat_started, fake.seat_frames, fake.ui_frames = steps or 3, fake.frame, nil, nil
-end
-function fake.seat_free() write_mem(REC, le32(0)); write_mem(REC + 0x30, '\0'); fake.seat_steps = nil end
-function fake.seat_update()
-    if fake.seat_steps then
-        local v = ffi.new('uint64_t[1]'); ffi.copy(v, read_mem(REC + 0x28, 8), 8)
-        if fake.now() >= tonumber(v[0]) then
-            fake.seat_steps = fake.seat_steps - 1
-            if fake.seat_steps == 0 then
-                fake.seat_steps = nil
-                write_mem(REC + 0x18, le32(0xffffffff)); write_mem(REC + 0x30, '\0'); write_mem(REC + 0x28, le64(0))
-                fake.calls[#fake.calls + 1] = 'seat reached'
-                fake.seat_frames = fake.frame - fake.seat_started
-                if u32_at(REC) == fake.POD1 or u32_at(REC) == fake.POD2 then
-                    fake.set_presenter(14); write_mem(STK, le32(11)); write_mem(STK + 0xb0, le64(SCR))
-                    write_mem(SCR + 0x27398c, le32(1)); write_mem(SCR + 0x273988, f32(2.0))
-                end
-            else
-                write_mem(REC + 0x28, le64(fake.now() + 1000000))
-            end
-        end
-    end
-    if u32_at(STK) == 11 and u32_at(SCR + 0x27398c) == 1 then
-        local t = f32_at(SCR + 0x273988) - 0.016
-        write_mem(SCR + 0x273988, f32(t))
-        if t <= 0 then
-            write_mem(SCR + 0x27398c, le32(0))
-            fake.calls[#fake.calls + 1] = 'briefing ui'
-            fake.ui_frames = fake.frame - (fake.seat_started or 0)
-        end
-    end
-end
-
--- The drop location zoom (the loadout screen's update, game.dll 0x1468320): the pick sets the screen's zoom target
--- (+0x2739c4) to 1; while the drop group ([0x3326aa0], players at +0x4ec0) has players, its zoom progress (+0x4f64)
--- moves toward the target at 1 per second; on the map page (screen + 8 = 0) with both at 1 the loadout page opens.
--- Without players the page opens at once.
-ZG = 0x2e000000
-fake.patch(0x3326aa0, le64(ZG)); fake.heap(ZG + 0x4ec0, string.rep('\0', 0xc0))
-write_mem(ZG + 0x4ec0, le32(1))
-fake.heap(ZG + 0x55f680, string.rep('\0', 0x10)); fake.heap(SCR + 0x27f0, string.rep('\0', 0x20))
-fake.heap(SCR, string.rep('\0', 0x10))
-function fake.set_page(page) write_mem(SCR + 8, le32(page)) end
-function fake.open_loadout(page)  -- the Hellpod briefing's loadout screen, on a page
-    fake.set_presenter(14); write_mem(STK, le32(11)); write_mem(STK + 0xb0, le64(SCR)); fake.set_page(page)
-end
-function fake.pick_drop() write_mem(SCR + 0x2739c4, f32(1)); fake.picked, fake.zoom_frames = fake.frame, nil end
-function fake.back_to_map() fake.set_page(0); write_mem(SCR + 0x2739c4, f32(0)) end
-function fake.zoom_progress() return f32_at(ZG + 0x4f64) end
-function fake.zoom_synced() return f32_at(ZG + 0x55f680) end
-function fake.loadout_update(dt)
-    if not fake.menu_open(14) or u32_at(STK) ~= 11 then return end
-    local target, progress = f32_at(SCR + 0x2739c4), f32_at(ZG + 0x4f64)
-    local players = u32_at(ZG + 0x4ec0) > 0
-    if players and progress ~= target then
-        progress = target > progress and math.min(target, progress + dt) or math.max(target, progress - dt)
-        write_mem(ZG + 0x4f64, f32(progress))
-    end
-    local synced = f32_at(ZG + 0x55f680)  -- the leader's progress, as the network messages bring it
-    if not players and synced < target then synced = math.min(target, synced + dt); write_mem(ZG + 0x55f680, f32(synced)) end
-    local follows = not players and read_mem(SCR + 0x27fe, 1):byte() == 0
-    if u32_at(SCR + 8) == 0 and target == 1 and ((players and progress == 1) or (follows and synced == 1)) then
-        fake.set_page(1)
-        fake.zoom_frames = fake.frame - fake.picked
-        fake.calls[#fake.calls + 1] = 'loadout page'
-    end
-end
-
--- Ship walk speed boost: the avatar manager [0x3326d20] maps entity ids to private record copies (buckets +0x547c70,
--- capacity +0x547c78, empty key +0x547c7c, multiplier +0x547c80); 0x354-byte copies inline from +0x547d24. A copy is
--- made at spawn, here with the ship's values (the ship's delta: walk 1.5, jog 4.08; the rest as the shared record).
-AVM, COPYMAP = 0x30000000, 0x30100000
-fake.patch(0x3326d20, le64(AVM))
-fake.heap(AVM + 0x547c70, string.rep('\0', 0x20)); fake.heap(COPYMAP, string.rep('\0', 8 * 8))
-write_mem(AVM + 0x547c70, le64(COPYMAP) .. le32(8) .. le32(0xffffffff) .. le32(MULT))
-for i = 0, 7 do write_mem(COPYMAP + i * 8, le32(0xffffffff) .. le32(0)) end
-fake.heap(AVM + 0x547d24, string.rep('\0', 0x354 * 4))
-fake.AVATAR, fake.OTHER = AVATAR, 0xa1a1
-fake.SHIP = {[4] = 0.75, [8] = 2.0, [0xc] = 1.5, [0x10] = 4.08, [0x14] = 5.5, [0x18] = 4.25, [0x1c] = 1.2, [0x20] = 1.5,
-             [0x24] = 2.25, [0x28] = 4.0, [0x2c] = 1.5, [0x30] = 1.5, [0x34] = 23}
-function fake.spawn_copy(entity, index)
-    local s = slot_of(entity, 8)
-    while u32_at(COPYMAP + s * 8) ~= 0xffffffff and u32_at(COPYMAP + s * 8) ~= entity do s = (s + 1) % 8 end
-    write_mem(COPYMAP + s * 8, le32(entity) .. le32(index))
-    for off, v in pairs(fake.SHIP) do write_mem(AVM + 0x547d24 + index * 0x354 + off, f32(v)) end
-end
-function fake.speed(index, off) return f32_at(AVM + 0x547d24 + index * 0x354 + off) end
-
--- Intro cinematics: the game's state list [0x3326e68] (count +0x2590, {object, type} entries from +0x2598) and the
--- title object. on_enter (0xad5950) stores the game object at +0 and its no-intro flag (+0x106f, or a return to the
--- title) as +0x10, and with it set starts at once; the update (0xad7cb0) runs the setup once the packages are loaded
--- (+0x144), which builds the video player only without the byte (+0x145), then queues the videos (+0x146) with a
--- player and without the byte.
-STATES, TITLE = 0x31000000, 0x32000000
-fake.patch(0x3326e68, le64(STATES)); fake.heap(STATES + 0x2580, string.rep('\0', 0x100))
-fake.heap(TITLE, string.rep('\0', 0x200)); fake.heap(GAME + 0x1060, string.rep('\0', 0x20))
-function fake.title_enter(back)
-    write_mem(TITLE, le64(GAME))
-    local skip = read_mem(GAME + 0x106f, 1):byte() ~= 0 or back
-    write_mem(TITLE + 0x10, skip and '\1' or '\0'); write_mem(TITLE + 0x144, '\0\0\0')
-    write_mem(STATES + 0x2598, le64(0x7000) .. le32(0xb7) .. le32(0) .. le64(TITLE) .. le32(0xb8) .. le32(0))
-    write_mem(STATES + 0x2590, le32(2))
-    fake.title_frames = 0
-    if skip then fake.calls[#fake.calls + 1] = 'title start' end
-end
-function fake.title_exit() write_mem(STATES + 0x2590, le32(0)) end
-function fake.title_byte(o) return read_mem(TITLE + o, 1):byte() end
-function fake.flag() return read_mem(GAME + 0x106f, 1):byte() end
-function fake.title_update()
-    if u32_at(STATES + 0x2590) == 0 then return end
-    fake.title_frames = fake.title_frames + 1
-    local b = fake.title_byte
-    if b(0x144) == 0 then
-        if fake.title_frames < (fake.load_frames or 120) then return end  -- its packages loading
-        if b(0x10) == 0 then write_mem(TITLE + 0x145, '\1'); fake.calls[#fake.calls + 1] = 'video player' end
-        write_mem(TITLE + 0x144, '\1')
-    end
-    if b(0x145) ~= 0 and b(0x146) == 0 and b(0x10) == 0 then
-        write_mem(TITLE + 0x146, '\1'); fake.calls[#fake.calls + 1] = 'intro videos'
-    end
-end
-
-function fake.frame_step(n)
-    for _ = 1, n or 1 do
-        fake.frame = fake.frame + 1
-        local dt = fake.dt or 0.016
-        if fake.tick then fake.set_now(fake.now() + math.floor(dt * 1e6)) end
-        update(dt)
-        fake.game_update()
-        fake.seat_update()
-        fake.loadout_update(dt)
-        fake.title_update()
-    end
-end
-function fake.calls_text() local s = table.concat(fake.calls, ';'); fake.calls = {}; return s end
+T.chef = chef
+return T
 '''
 
-results = []
+failures = []
 
 
 def check(cond, what):
-    results.append(bool(cond))
-    print(('PASS ' if cond else 'FAIL ') + what)
+    if not cond:
+        failures.append(what)
 
 
-CHOICE = {'off': 1, 'key': 2, 'auto': 3}
-QUICK = ('intro', 'hellpod', 'zoom')  # Off / Automatic only
-QUICK_CHOICE = {'off': 1, 'auto': 2}
-SWITCH = ('shipspeed',)  # Off / On
-SWITCH_CHOICE = {'off': 1, 'on': 2}
-FEATURE_IDS = ('intro', 'login', 'pod', 'ftl', 'hellpod', 'zoom', 'shipspeed')
+ROWS = ('login_intro', 'cryo_pod', 'ftl', 'hellpod_entry', 'drop_zoom')
+OFF, FAST, INSTANT = 1, 2, 3
 
 
-def new_game(settings, image, prepare='', menu=True):
-    """settings: '<feature>_<off|key|auto|on>' names set in Mod Options Menu; unnamed features are Off.
-    menu=False: Mod Options Menu is not installed."""
-    logdir = tempfile.mkdtemp(prefix='sia_rel_')
-    lua = LuaRuntime(unpack_returned_tuples=True)
-    lua.execute(HARNESS, logdir, image)
-    values = {k: 1 for k in FEATURE_IDS}
-    for name in settings:
-        feature, mode = name.split('_')
-        values[feature] = (QUICK_CHOICE if feature in QUICK else SWITCH_CHOICE if feature in SWITCH else CHOICE)[mode]
-    for feature, value in values.items():
-        lua.execute(f"fake.values['{feature}'] = {value}")
-    if not menu:
-        lua.execute('ModOptionsMenu = nil')
-    lua.execute(prepare)
-    lua.execute(SOURCE)
-    return lua, Path(logdir)
+class Run:
+    """A fresh Lua runtime: the title screen's worlds (the ship's, still empty, and the destroyer's), then the mod,
+    with every F9 row saved at `mode` (None: no value saved, the rows' defaults)."""
+
+    def __init__(self, mode=FAST):
+        self.lua = lupa.LuaRuntime()
+        self.T = self.lua.execute(FAKE)
+        self.do('T.ship = T.world({ T.camera(0, 0, 0, 0.785) }); T.dest = T.world({ T.camera(0, 0, 0, 0.785) }); '
+                'T.map = T.world({ T.camera(0, 0, 0, 0.785) }); T.worlds = { T.ship, T.dest, T.map }; T.main = T.ship')
+        if mode is not None:
+            self.do(' '.join('T.rows[%r] = %d;' % (row, mode) for row in ROWS))
+        self.mod = self.lua.execute('local src, chef = ...; return assert(loadstring(src, "@mod"))(chef)',
+                                    SRC, self.T.chef)
+        self.dt = 0
+
+    def do(self, code):
+        self.lua.execute('local T = ...; ' + code, self.T)
+
+    def frame(self, n=1, real=1 / 60, keys=(), click=False):
+        for i in range(n):
+            dt = real * self.T.mult + self.T.jump   # the engine hands update the game's step, with a jump asked
+            self.T.jump = 0
+            self.dt = dt
+            self.T.now = self.T.now + real
+            self.do('for _, w in ipairs(T.worlds) do w.time = w.time + %r end; '
+                    'for k in pairs(T.keys) do T.keys[k] = nil end; %s T.mouse.left = %s'
+                    % (dt, ' '.join('T.keys[%r] = true;' % k for k in keys), 'true' if click and i == 0 else 'false'))
+            self.mod.update(dt)
+
+    def set(self, row, mode):
+        """A row changed in the F9 menu."""
+        self.T.set(row, mode)
+
+    def posture(self, state):
+        self.do('T.me.anim[14] = %d' % state)
+
+    def in_pod(self, fov=1.222):
+        """Ours in its hellpod, the ship's camera on the drop location map's view (a host's or a solo player's as the
+        clip ends; a client's holds a close-up on the pod first, fov 0.611)."""
+        self.do('T.me.anim[14] = 17; T.ship.units[1].cam.fov = %r' % fov)
+
+    def map_page(self):
+        """The loadout screen's world as the drop location map shows: its floor of planes, no Helldiver yet."""
+        self.do('T.fill(T.map, "96af7d6acb949f34", 19)')
+
+    def friend(self, x=5, y=5, first=True):
+        """Another player's Helldiver on the ship (T.other), listed before ours when `first`."""
+        self.do('T.other = T.diver({ 1, 2, 3, 4, 5, 6, 7, 8, 59, 10, 11, 12, 13, 3, 0 }, 2, %d, %d); T.owner[2] = "peer2"; '
+                'table.insert(T.ship.units, %s, T.other)' % (x, y, '2' if first else '#T.ship.units + 1'))
+
+    def walk(self, samples, friend_too=False):
+        """The player walks: our Helldiver and the camera 1 m further every 0.25 s (and the friend alongside)."""
+        for _ in range(samples):
+            self.do('T.me.pos.x = T.me.pos.x + 1; T.ship.units[1].cam.x = T.ship.units[1].cam.x + 1'
+                    + ('; T.other.pos.x = T.other.pos.x + 1' if friend_too else ''))
+            self.frame(15)
+
+    def rate(self):
+        return self.T.mult
+
+    def speed(self):
+        """What the last frame asked for the next: 'jump' (a jump, at x1), 'x8' or 'x1'."""
+        if self.T.jump > 0:
+            return 'jump' if self.T.mult == 1 else 'jump at x%d' % self.T.mult
+        return 'x%d' % self.T.mult
+
+    def lines(self, since=0):
+        return list(self.T.log.values())[since:]
+
+    # the scenes
+    def ship(self):
+        """The ship loaded: its world big and main, a camera in play, the Helldiver; the destroyer's world empty."""
+        self.do('T.ship.units[1].cam.fov = 1.134; T.fill(T.ship, "aaaa000000000001", 1500); '
+                'T.fill(T.ship, "46cab355bd8d4d37", 1); '
+                'T.me = T.diver({ 1, 2, 3, 4, 5, 6, 7, 8, 59, 10, 11, 12, 13, 36, 0 }, 1); T.ship.units[#T.ship.units + 1] = T.me; '
+                'T.main = T.ship')
+
+    def outside(self, units=590):
+        """The destroyer's world fills with its cannons and the rest: 590 units as in an FTL (584 to 593 live), 54 as
+        in the log-in intro (62 or 63), 28 as in the hellpod launch (25 to 33), 17 as in a lobby change (11 to 24).
+        T.keep(T.dest, 6) leaves the camera and five others, as in the walk to the bridge."""
+        self.do('T.fill(T.dest, "e857e91975dbb999", %d); T.fill(T.dest, "46cab355bd8d4d37", 1); '
+                'T.fill(T.dest, T.CANNON, 2)' % (units - 4))
+
+    def inside(self):
+        self.do('T.keep(T.dest, 1)')
 
 
-def text(path):
-    return path.read_text(encoding='utf-8') if path.exists() else ''
+# log-in intro: fast from the outside shot on, through the walk to the bridge, x1 once the camera goes wide
+r = Run()
+check(r.T.own_log == 'ImpatientDiver', 'own log name')
+check(r.T.title == 'Impatient Diver (CSL/EAC)', 'the F9 menu names the mod Impatient Diver (CSL/EAC)')
+r.frame(30)
+check(r.rate() == 1, 'nothing sped up on the title screen')
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame()
+check(r.rate() == 8, 'the log-in intro\'s outside shot is sped up')
+r.frame(60)
+r.do('T.keep(T.dest, 6)')        # the walk to the bridge: the cannons go, a few units stay
+r.ship()                         # its camera wide for the first frames 
+r.frame(2)
+check(r.rate() == 8, 'still fast as the ship loads with its camera wide')
+r.do('T.ship.units[1].cam.fov = 0.262')
+r.frame(15)
+r.inside()                       # the destroyer's world empties before the walk ends
+r.frame(15)
+check(r.rate() == 8, 'still fast in the walk to the bridge')
+r.do('T.ship.units[1].cam.fov = 1.134')
+r.frame()
+check(r.rate() == 1, 'x1 the frame the camera goes wide again')
+r.frame(120)
+check(r.rate() == 1, 'stays x1 after the log-in intro')
 
+# before the ship loads, the log-in intro ends when the destroyer's world empties
+r = Run()
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame(10)
+r.inside()
+r.frame()
+check(r.rate() == 1, 'x1 the frame the destroyer\'s world empties, no ship yet')
 
-def sig_bytes(image, name):
-    rva, text_, _ = ROWS[name]
-    return rva, image[rva:rva + len(text_.split())]
+# a ship whose camera never narrows: no walk to the bridge, x1 after 3 s of game time
+r = Run()
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame(10)
+r.ship()
+r.frame(2)
+check(r.rate() == 8, 'fast while waiting for the walk')
+r.frame(5)                       # 5 frames at x8: 0.67 s of game time
+r.frame(30)                      # 30 more: 4.7 s
+check(r.rate() == 1, 'x1 when no walk to the bridge follows')
 
+# cannons still there when the log-in intro ends: no FTL made of them
+r = Run()
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame(10)
+r.ship()
+r.do('T.ship.units[1].cam.fov = 0.262')
+r.frame(30)
+check(r.rate() == 8, 'fast in the walk to the bridge, cannons left')
+r.do('T.ship.units[1].cam.fov = 1.134')
+r.frame(120)
+check(r.rate() == 1, 'x1 after the log-in intro, cannons left')
 
-def lua_bytes(data):
-    return ''.join('\\%d' % b for b in data)
+# FTL: fast while the destroyer's world holds its cannons, x1 the frame they go
+r = Run()
+r.ship()
+r.frame(200)
+check(r.rate() == 1, 'nothing sped up on the ship')
+r.outside()
+r.frame()
+check(r.rate() == 8, 'the FTL is sped up')
+r.frame(60)
+r.inside()
+r.frame()
+check(r.rate() == 1, 'x1 the frame the FTL ends')
+r.frame(60)
+r.outside()
+r.frame()
+check(r.rate() == 8, 'a second FTL is sped up')
+r.mod.shutdown()
+check(r.T.policy[len(r.T.policy)][2] == 1, 'shutdown puts x1 back')
 
+# the hellpod launch: the destroyer's world becomes the main world once the ship was loaded: left alone, though its
+# ship empties as its cannons come (ours was last seen in its hellpod; live, the ship emptied 1.2 s before them)
+r = Run()
+r.ship()
+r.frame(60)
+r.in_pod()
+r.frame(30)
+r.do('T.keep(T.ship, 3)')
+r.outside(28)
+r.do('T.main = T.dest')
+r.frame(120)
+check(r.rate() == 1, 'the hellpod launch is not sped up')
+check(not any(p[1] == 'external_multiplier' and p[2] == 8 for p in
+              (tuple(x.values()) for x in r.T.policy.values())), 'no x8 asked in the launch')
 
-def main():
-    for pattern in (r'//', r'\bgoto\b', r'&(?!&)', r'~(?!=)', r'<<', r'>>'):
-        check(not re.search(pattern, MAIN.split('\n', 1)[1].replace('-->', '')), f'no Lua 5.3+ construct {pattern!r}')
-    check(SOURCE.startswith('-- HD2-Addon: mods/alomare/skip_intro_animation\n'), 'declaration line first')
-    check(not sigspec.check(MOD / 'skip_intro_animation.lua', sigspec.build(signatures.SPECS)),
-          'the script carries the current signatures and signature engine')
-    image = DUMP.read_bytes()
-    fake = lambda lua: lua.globals().fake
-    version = re.search(r"local M = {version = '([^']+)'", MAIN).group(1)
+# the launch's outside world filling while the ship is still loaded and on screen: its own kind tells it (even in a
+# world the FTL's size)
+r = Run()
+r.ship()
+r.frame(60)
+r.do('T.fill(T.dest, "e93e9835bce95d4a", 1)')
+r.outside()
+r.frame(30)
+check(r.rate() == 1, 'the launch is not sped up when its kind shows first')
 
-    # 1. Every skip Off: only the map exit (always on) runs; then turning one on in the menu starts it live.
-    lua, logs = new_game([], image)
-    f = fake(lua)
-    f.frame_step(3)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 1 feature(s) active') and 'Galactic map quick exit: On' in status
-          and 'Hellpod to loadout: Off' in status and f.base_updates == 3,
-          'every skip Off: the map exit alone, update chained: %r' % (status.splitlines()[:1],))
-    opts = f.options
-    ids = sorted(opts.keys()) if opts else []
-    every = ['alomare.skip_intro_animation.' + k for k in FEATURE_IDS]
-    quick = ['alomare.skip_intro_animation.' + k for k in QUICK]
-    switch = ['alomare.skip_intro_animation.' + k for k in SWITCH]
-    esc = 'alomare.skip_intro_animation.mapesc'
-    check(ids == sorted(every + [esc])
-          and all(opts[i].mod == 'Impatient Diver' and opts[i].type == 'choice' for i in every + [esc])
-          and opts[esc].default == 2 and list(opts[esc].choices.values()) == ['Off', 'On']
-          and opts[esc].label == 'ESC Closes Galactic Map'
-          and all(opts[i].default == 3 and list(opts[i].choices.values()) == ['Off', 'Manual', 'Automatic']
-                  for i in every if i not in quick + switch)
-          and all(opts[i].default == 2 and list(opts[i].choices.values()) == ['Off', 'Automatic'] for i in quick)
-          and all(opts[i].default == 1 and list(opts[i].choices.values()) == ['Off', 'On'] for i in switch)
-          and [opts['alomare.skip_intro_animation.' + k].label for k in FEATURE_IDS]
-          == ['Intro Cinematics', 'Log-in Ship Intro', 'Cryo Pod Transition', 'FTL Transition', 'Hellpod to Loadout',
-              'Drop Location Zoom', 'Ship Walk Speed Boost'],
-          'ESC Closes Galactic Map (On), three Off/Manual/Automatic options, three Off/Automatic ones and the speed boost '
-          '(Off), the skips on by default')
-    check(list(f.order.values()) == ['mapesc', 'shipspeed', 'intro (gap)', 'login', 'pod', 'ftl', 'hellpod', 'zoom'],
-          'menu order: ESC Closes Galactic Map, the speed boost, a gap, the skips in the order they happen: %r'
-          % list(f.order.values()))
-    check(f.map_bound == 'alomare.skip_intro_animation.map|Close galactic map',
-          'the map key is a Mod Bindings Menu binding: %r' % f.map_bound)
-    check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene',
-          'the skip binding is registered with every skip Off: %r' % f.bound)
-    f.apply('login', 3)
-    f.frame_step(1)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 2 feature(s) active') and 'Log-in ship intro: Automatic (ship_intro' in status
-          and 'Cryo pod transition: Off' in status and 'Galactic map quick exit: On' in status,
-          'turning a skip on in the menu reports it: %r' % (status,))
-    NOW = 100000000
-    f.set_now(NOW); f.set_stamp(0x88, NOW - 100000)
-    f.set_scene(7, 1)
-    f.frame_step(3)
-    check(f.calls_text().startswith('update 7 1->2'), 'the skip turned on in the menu works at once')
-    f.set_scene(0, 0); f.frame_step(1900); f.calls_text()
-    f.apply('login', 1)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    f.set_stamp(0x88, NOW - 100000); f.set_scene(7, 1)
-    f.space = True; f.frame_step(1); f.space = False; f.frame_step(30)
-    check(status.startswith('OK - 1 feature(s) active') and 'Log-in ship intro: Off' in status
-          and f.calls_text() == '' and f.stamp(0x88) == NOW - 100000,
-          'switching it back Off leaves the scene alone and says so')
-    f.apply('login', 2)
-    f.frame_step(1)
-    f.space = True; f.frame_step(1); f.space = False; f.frame_step(2)
-    check(f.calls_text().startswith('update 7 1->2') and 'Log-in ship intro: Manual' in text(logs / 'ImpatientDiver_STATUS.log'),
-          'switched to Manual: spacebar skips it')
+# the same while the loadout screen shows the Helldiver (the player is in the hellpod)
+r = Run()
+r.ship()
+r.do('T.map.units[#T.map.units + 1] = T.diver({ 1, 2, 3 })')
+r.frame(60)
+r.outside()
+r.frame(30)
+check(r.rate() == 1, 'nothing sped up while the loadout screen is up')
 
-    # 1b. Mod Options Menu not installed: every skip at its default, the map exit on.
-    lua, logs = new_game([], image, menu=False)
-    f = fake(lua)
-    f.frame_step(1)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 7 feature(s) active') and 'Settings: defaults, every skip on, speed boost off' in status
-          and status.count(': Automatic (') == 6 and 'Drop location zoom: Automatic (map zoom)' in status and ': Manual (' not in status
-          and 'Hellpod to loadout: Automatic (seat transition, briefing intro)' in status
-          and 'Intro cinematics: Automatic (title screen no-intro start)' in status
-          and 'Ship walk speed boost: Off' in status
-          and 'Galactic map quick exit: On (Escape or the Mod Bindings Menu key' in status,
-          'without Mod Options Menu: every skip Automatic, the speed boost off, the map exit on: %r' % (status,))
-    f.frame_step(1)
-    check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene',
-          'the skip binding is registered with every skip Automatic: %r' % f.bound)
+# a mission: x1 at once; after it, its return's outside shot (the ship loading under it) with nothing sped up, until
+# the shot is over; leaving the lobby 13 s later is sped up  waited for the 90 s)
+r = Run()
+r.ship()
+r.frame(60)
+r.outside()
+r.frame()
+check(r.rate() == 8, 'FTL fast before the mission test')
+r.do('T.mw = T.world(); T.fill(T.mw, "aaaa000000000002", 13000); T.worlds[#T.worlds + 1] = T.mw')   # it loads
+r.frame()
+r.T.mission = True
+r.frame()
+check(r.rate() == 1, 'x1 the frame a mission starts')
+r.do('T.main = T.mw')
+r.frame(300)
+check(r.rate() == 1, 'x1 throughout the mission, the outside world full')
+r.do('T.keep(T.ship, 3); T.keep(T.dest, 1)')
+r.T.mission = False
+r.frame(2)                       # the mission's world still the main one, no outside shot yet
+r.outside(41)
+r.do('T.main = T.dest')
+r.frame(60)
+check(r.rate() == 1, 'nothing sped up in the return\'s outside shot')
+r.do('T.keep(T.dest, 1); T.main = T.mw')    # the shot blinks out with the mission's world the main one
+r.frame()
+r.outside(41)
+r.do('T.main = T.dest')
+r.frame()
+check(not any('the return from the mission is over' in l for l in r.lines()),
+      'the return is not over while no ship loaded since the mission')
+r.ship()
+r.frame(10)
+check(r.rate() == 1 and not any('SCENE lobby change' in l for l in r.lines()),
+      'nor as the ship loads under it (no lobby change)')
+r.inside()
+r.frame()
+check(any('the return from the mission is over' in l for l in r.lines()), 'the return is over once its shot is')
+r.frame(13 * 60)
+r.do('T.keep(T.ship, 3)')
+r.outside(23)
+r.do('T.main = T.dest')
+r.frame()
+check(r.rate() == 8, 'leaving the lobby 13 s after the return: sped up')
+r.inside()
+r.frame(95 * 60)
+r.outside()
+r.frame()
+check(r.rate() == 8, 'an FTL long after the mission is sped up')
 
-    # 1c. Mod Options Menu loaded after this addon: connected on a later frame, its values take over.
-    lua, logs = new_game(['pod_key'], image, menu=False)
-    f = fake(lua)
-    f.frame_step(2)
-    lua.execute('ModOptionsMenu = fake.option_menu')
-    f.frame_step(1)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 2 feature(s) active') and 'Settings: Mod Options Menu' in status
-          and 'Cryo pod transition: Manual' in status and 'Log-in ship intro: Off' in status,
-          'a menu that loads later is connected and its values apply: %r' % (status,))
+# ... a return with no outside shot seen  keeps the 90 s
+r = Run()
+r.ship()
+r.frame(60)
+r.T.mission = True
+r.frame(60)
+r.do('T.keep(T.ship, 3)')
+r.T.mission = False
+r.frame(30)
+r.ship()
+r.frame(13 * 60)
+r.outside(17)
+r.frame()
+check(r.rate() == 1, 'a return with no outside shot: no lobby change sped up within the 90 s')
 
-    # 1c'. Saved values from the three-choice versions: Manual (2) and Automatic (3) on a quick option are Automatic.
-    lua, logs = new_game([], image, "fake.values['hellpod'] = 3; fake.values['zoom'] = 2")
-    f = fake(lua)
-    f.frame_step(2)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check('Hellpod to loadout: Automatic' in status and 'Drop location zoom: Automatic' in status,
-          'old saved choices on the quick options read as Automatic: %r' % (status.splitlines()[-3:-1],))
+# other players in the session: the FTL sped up all the same, as host and not, and the session is logged
+r = Run()
+r.ship()
+r.T.players = 2
+r.frame(60)
+r.outside()
+r.frame()
+check(r.rate() == 8, 'the FTL is sped up with another player in the session, as host')
+r.inside()
+r.frame(30)
+r.T.host = False
+r.T.players = 3
+r.frame(60)
+r.outside()
+r.frame()
+check(r.rate() == 8, 'the FTL is sped up with other players in the session, not host')
+check(any('SESSION host, 2 players' in l for l in r.lines()) and any('SESSION not host, 3 players' in l for l in r.lines())
+      and any('SCENE FTL starts' in l and 'not host, 3 players' in l for l in r.lines()), 'the session is logged')
 
-    # 1d. A menu that gives no value (or registration fails): that feature stays on.
-    lua, logs = new_game([], image, "fake.option_menu.get = function() return nil end; "
-                                    "local reg = fake.option_menu.register_option; fake.option_menu.register_option = "
-                                    "function(id, spec) if id:find('pod') then return false, 'full' end return reg(id, spec) end")
-    f = fake(lua)
-    f.frame_step(1)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 7 feature(s) active') and 'not registered: full' in text(logs / 'ImpatientDiver.log'),
-          'no value from the menu, or a failed registration, keeps the defaults: %r' % (status,))
+# the cap: at most 45 s of game time fast, then x1 until the scene ends
+r = Run()
+r.ship()
+r.frame(60)
+r.outside()
+r.frame(int(5.4 * 60))           # 5.4 s real at x8: 43 s of game time
+check(r.rate() == 8, 'still fast before the cap')
+r.frame(int(1 * 60))
+check(r.rate() == 1, 'x1 after 45 s of game time')
+r.frame(600)
+check(r.rate() == 1, 'stays x1 while the capped scene goes on')
+r.inside()
+r.frame(30)
+r.outside()
+r.frame()
+check(r.rate() == 8, 'the next scene is fast again')
 
-    # 1e. Mod Options Menu v1.1 (version 2): texts are functions in the game's language (English here); OFF stays the
-    #     game's own word. Mod Bindings Menu v2.1 (version 3): the binding's texts are functions too.
-    lua, logs = new_game([], image, "fake.option_menu.version = 2; fake.option_menu.register_option = "
-                                    "function(id, spec) fake.options[id] = spec; return true end; "
-                                    "ModBindingsMenu.version = 3; ModBindingsMenu.register_binding = function(id, label, slot, o) "
-                                    "fake.bind(id, label() .. '|' .. o.category() .. '|' .. tostring(o.backend)); return true end")
-    f = fake(lua)
-    f.apply('pod', 2)
-    f.frame_step(2)
-    o = f.options['alomare.skip_intro_animation.pod']
-    check(callable(o.label) and o.label() == 'Cryo Pod Transition' and o.mod() == 'Impatient Diver'
-          and o.choices[1] == 'Off' and o.choices[2]() == 'Manual' and o.choices[3]() == 'Automatic'
-          and len(o.description()) <= 400, 'v1.1 menu: texts passed as functions, OFF plain')
-    check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene|Impatient Diver|nil'
-          and f.map_bound == 'alomare.skip_intro_animation.map|Close galactic map|Impatient Diver|nil',
-          'v2.1 bindings: labels and section passed as functions; v2.3: no backend asked for: %r %r'
-          % (f.bound, f.map_bound))
+# the hellpod entry: fast while the stepping-in clip plays, x1 once the Helldiver is in the pod
+r = Run()
+r.ship()
+r.frame(60)
+r.posture(15)
+r.frame()
+check(r.rate() == 8, 'the hellpod entry is sped up')
+r.frame(30)
+r.in_pod()
+r.frame()
+check(r.rate() == 1, 'x1 the frame the Helldiver is in the hellpod')
+r.frame(60)
+check(r.rate() == 1, 'stays x1 in the hellpod')
 
-    # 2. All three selected, this build: fast path resolves everything from the real code.
-    lua, logs = new_game(['login_auto', 'pod_key', 'ftl_auto'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    t = lua.globals().ImpatientDiver._test
-    d = t.derived
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(d.manager == 0x346d530 and d.clock == 0x3326348 and d.fader == 0x347cda8,
-          'globals derived from the code: %r' % ([hex(d[k]) if d[k] else None for k in ('manager', 'clock', 'fader')],))
-    v = t['values']
-    check(v.current == 0x190c and v.clock_now == 0x18 and v.t13p3_wait == 7500000 and v.t13p2_stamp == 0x90
-          and v.t3_25_wait == 2500000 and v.fader_duration == 0x784,
-          'offsets and waits read from the code (current 0x%x, pod walk-out %d us)' % (v.current, v.t13p3_wait))
-    ids = d.scene_ids
-    check(ids and ids['ship_intro'] == 7 and ids['ship_bridge_intro'] == 3 and ids['ship_teleporter_arrival'] == 13
-          and ids['ship_planet_departure'] == 12 and ids['ship_planet_arrival'] == 11
-          and ids['ship_teleporter_network_join'] == 15, 'scene ids read from the game\'s name table')
-    check(status.splitlines()[:7] == ['OK - 4 feature(s) active', 'Impatient Diver ' + version,
-                                      'Settings: Mod Options Menu (escape menu > MODS > Impatient Diver)',
-                                      'Intro cinematics: Off',
-                                      'Log-in ship intro: Automatic (ship_intro, ship_bridge_intro)',
-                                      'Cryo pod transition: Manual (ship_teleporter_arrival)',
-                                      'FTL transition: Automatic (ship_planet_departure, ship_planet_arrival, ship_teleporter_network_join)'],
-          'status file: verdict first, then each skip: %r' % (status,))
-    f.frame_step(1)
-    check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene', 'binding id and label')
+# a session that names our Helldiver: the one this game owns (another player's, listed first, speeds nothing up)
+r = Run()
+r.T.players = 2
+r.ship()
+r.friend()
+r.frame(60)
+r.do('T.other.anim[14] = 15')
+r.frame(10)
+check(r.rate() == 1, 'another player\'s hellpod entry speeds nothing up')
+check(any('HELLDIVER owned (game object:owner 2:peer2 1:me) (2 in main world 1)' in l for l in r.lines()),
+      'each Helldiver\'s game object and owner are logged')
+r.posture(15)
+r.frame()
+check(r.rate() == 8, 'our hellpod entry is sped up with another player in the session')
 
-    # Log-in intro, automatic: both scenes fast-forwarded; the game changes every phase itself, through the
-    # bridge intro's own done phase (no interrupt, no posted audio).
-    f.set_now(NOW)
-    f.set_stamp(0x88, NOW - 100000)
-    f.set_scene(7, 1)
-    f.frame_step(40)
-    login = f.calls_text()
-    expected = ['update 7 1->2', 'update 7 2->3'] + ['update 3 %d->%d' % (p, p + 1) for p in range(2, 13)]
-    check(login == ';'.join(expected) and f.scene()[0] == 0,
-          'log-in intro fast-forwarded through every phase of both scenes: %r' % (login,))
-    check(f.bound == 'alomare.skip_intro_animation.skip|Skip cutscene', 'Mod Bindings Menu binding registered for key mode')
+# ... and several owned: none read
+r = Run()
+r.T.players = 2
+r.ship()
+r.friend()
+r.do('T.owner[2] = "me"; T.other.anim[14] = 15')
+r.frame(60)
+check(r.rate() == 1 and any('not known yet (several owned' in l for l in r.lines()), 'several Helldivers owned: none read')
 
-    # Cryo pod, key mode: nothing until spacebar; then the game's own update runs every phase.
-    f.frame_step(1900)  # let the log-in chain run out
-    f.calls_text()
-    f.set_stamp(0x88, NOW - 1000000); f.set_stamp(0x90, NOW - 200000)
-    f.set_scene(13, 2)
-    f.frame_step(20)
-    untouched = (f.calls_text(), f.stamp(0x90))
-    f.space = True; f.frame_step(1); f.space = False
-    f.frame_step(1)
-    moved = f.calls_text()
-    f.frame_step(28)
-    held = f.calls_text()
-    f.frame_step(5)
-    finished = f.calls_text()
-    check(untouched == ('', NOW - 200000), 'pod in key mode waits for the key: %r' % (untouched,))
-    check(moved == 'update 13 2->3' and held == '' and finished == 'update 13 3->4;update 13 4->5' and f.scene()[0] == 0,
-          'spacebar fast-forwards the pod; phase 3 held for the body placement: %r %r %r' % (moved, held, finished))
+# no unit synchronizer (as in the game, : the only Helldiver while solo is ours, and stays ours once a
+# friend comes aboard
+r = Run()
+r.T.sync = None
+r.ship()
+r.frame(60)
+check(any('HELLDIVER the only one, solo (1 in main world 1)' in l for l in r.lines()), 'solo: the only Helldiver is ours')
+r.T.players = 2
+r.friend()
+r.frame(60)
+r.do('T.other.anim[14] = 15')
+r.frame(10)
+check(r.rate() == 1, 'a friend who came later: their hellpod entry speeds nothing up')
+r.do('T.other.anim[14] = 3')
+r.posture(15)
+r.frame()
+check(r.rate() == 8, 'ours, known from before the friend came: sped up')
 
-    # FTL, automatic: departure then arrival, fades held clear; the chain does not enter a key-mode pod.
-    f.frame_step(1900)  # let the pod's key-press chain run out
-    f.calls_text()
-    f.set_stamp(0x88, NOW - 1000000); f.fader(0.5, 1.0)
-    f.set_scene(12, 3)
-    f.frame_step(1)
-    fade_during = f.fade()
-    f.frame_step(3)
-    ftl = f.calls_text()
-    f.set_scene(13, 2); f.set_stamp(0x90, NOW - 200000)
-    f.frame_step(5)
-    pod_after_auto = (f.calls_text(), f.stamp(0x90))
-    check(ftl == 'update 12 3->4;update 11 2->3' and fade_during == '0.00/0.00',
-          'FTL departure and arrival fast-forwarded automatically, fade held clear: %r %r' % (ftl, fade_during))
-    log = text(logs / 'ImpatientDiver.log')
-    check('Scene ship_planet_departure' in log and 'Scene ship_planet_arrival' in log and 'Scene none' in log,
-          'scene changes are logged by name')
-    check(pod_after_auto == ('', NOW - 200000), 'an automatic FTL does not carry on into a key-mode pod: %r' % (pod_after_auto,))
-    f.fader(0.5, 1.0)
-    f.set_scene(13, 2); f.frame_step(1)
-    check(f.fade() == '0.50/1.00', 'fades are left alone outside the FTL scenes too')
-    f.set_scene(0, 0); f.frame_step(2); f.calls_text()
+# no unit synchronizer, two Helldivers from the start: none read until the camera follows ours, alone
+r = Run()
+r.T.sync = None
+r.T.players = 2
+r.ship()
+r.friend()
+r.frame(60)
+check(any('not known yet (no unit synchronizer' in l for l in r.lines()), 'ours not known yet, and why')
+r.do('T.other.anim[14] = 15')
+r.frame(10)
+check(r.rate() == 1, 'ours not known: a friend\'s hellpod entry speeds nothing up')
+r.do('T.other.anim[14] = 0')
+r.frame(40)
+check(r.rate() == 1, 'host, ours not known: a friend\'s cryo pod speeds nothing up')
+r.do('T.other.anim[14] = 3')
+r.walk(3, friend_too=True)
+check(not any('the camera follows' in l for l in r.lines()), 'two Helldivers walking with the camera: neither')
+r.walk(2)
+check(not any('the camera follows' in l for l in r.lines()), 'not after two moving samples')
+r.walk(4)
+check(any('HELLDIVER the one the camera follows' in l for l in r.lines()), 'ours: the one the camera follows')
+r.do('T.other.anim[14] = 15')
+r.frame(10)
+check(r.rate() == 1, 'ours found: a friend\'s hellpod entry still speeds nothing up')
+r.do('T.other.anim[14] = 3')
+r.posture(15)
+r.frame()
+check(r.rate() == 8, 'ours found by the camera: our hellpod entry is sped up')
 
-    # A timer ahead of the clock (wrong layout) stops without writing.
-    f.set_stamp(0x88, NOW + 5)
-    f.set_scene(12, 3)
-    f.frame_step(3)
-    check(f.stamp(0x88) == NOW + 5 and 'timer ahead of the clock' in text(logs / 'ImpatientDiver.log'),
-          'a timer ahead of the clock is never written')
-    f.set_scene(0, 0); f.frame_step(1900)
+# just joined another's session: the only Helldiver in the cryo pod is ours
+r = Run(mode=INSTANT)
+r.T.sync = None
+r.ship()
+r.frame(60)
+r.do('T.me.alive = false; for i, u in ipairs(T.ship.units) do if u == T.me then table.remove(T.ship.units, i) break end end')
+r.T.host = False
+r.T.players = 2
+r.friend()
+r.do('T.other.anim[14] = 15')    # the friend's Helldiver alone aboard before ours comes: not ours
+r.frame(40)
+check(r.speed() == 'x1', 'just joined, the friend\'s Helldiver alone aboard: not ours')
+r.do('T.other.anim[14] = 3')
+r.do('T.me = T.diver({ 1, 2, 3, 4, 5, 6, 7, 8, 59, 10, 11, 12, 13, 0, 0 }, 1); T.ship.units[#T.ship.units + 1] = T.me')
+r.frame(40)
+check(any('HELLDIVER the only one in the cryo pod, just joined' in l for l in r.lines())
+      and any('SCENE cryo pod starts' in l for l in r.lines()), 'just joined: our cryo pod is sped up')
 
-    # Scenes outside the list are never touched, whatever the key.
-    f.set_scene(5, 1); f.set_stamp(0x88, NOW - 1000000)
-    f.space = True; f.frame_step(1); f.space = False; f.frame_step(30)
-    check(f.calls_text() == '' and f.stamp(0x88) == NOW - 1000000, 'unlisted scene (cryogenic intro) untouched')
+# ... but not a minute after joining, nor two in their pods
+r = Run()
+r.T.sync = None
+r.ship()
+r.frame(60)
+r.do('T.me.alive = false; for i, u in ipairs(T.ship.units) do if u == T.me then table.remove(T.ship.units, i) break end end')
+r.T.host = False
+r.T.players = 2
+r.friend()
+r.frame(61 * 60)
+r.do('T.me = T.diver({ 1, 2, 3, 4, 5, 6, 7, 8, 59, 10, 11, 12, 13, 0, 0 }, 1); T.ship.units[#T.ship.units + 1] = T.me')
+r.frame(40)
+check(r.rate() == 1, 'a minute after joining: a Helldiver in the cryo pod isn\'t taken as ours')
+r = Run()
+r.T.sync = None
+r.T.players = 2
+r.ship()
+r.friend()
+r.do('T.other.anim[14] = 0; T.me.anim[14] = 0')
+r.frame(30)
+r.T.host = False
+r.frame(60)
+check(not any('HELLDIVER the only one in the cryo pod' in l for l in r.lines()),
+      'just joined, two Helldivers in their pods: neither taken as ours')
+check(r.rate() == 8, '... though ours is in one of them: sped up (every player\'s Helldiver in the pod)')
 
-    # 3. Key-mode FTL: one press follows the lobby join chain into a selected pod.
-    lua, logs = new_game(['pod_key', 'ftl_key'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_now(NOW)
-    f.set_stamp(0x88, NOW - 1000000)
-    f.set_scene(15, 3)
-    f.frame_step(5)
-    waiting = f.calls_text()
-    f.space = True; f.frame_step(1); f.space = False; f.frame_step(2)
-    join = f.calls_text()
-    f.frame_step(100)
-    f.set_scene(13, 2); f.set_stamp(0x90, NOW - 200000)
-    f.frame_step(40)
-    chain = f.calls_text()
-    check(waiting == '' and join == 'update 15 3->4' and chain == 'update 13 2->3;update 13 3->4;update 13 4->5',
-          'a key press on the lobby join also skips the pod that follows: %r %r %r' % (waiting, join, chain))
-    f.set_scene(7, 1); f.space = True; f.frame_step(1); f.space = False; f.frame_step(30)
-    check(f.calls_text() == '', 'a feature switched off (log-in intro) is left alone')
+# host: a friend's cryo pod speeds nothing up
+r = Run()
+r.T.sync = None
+r.ship()
+r.frame(60)
+r.T.players = 2
+r.friend()
+r.do('T.other.anim[14] = 0')
+r.frame(60)
+check(r.rate() == 1, 'host: a friend\'s cryo pod speeds nothing up')
 
-    # 4. Moved code: this build's address no longer matches, so the scan finds it elsewhere.
-    moved_at = 0x500000  # inside the code section (the search only covers executable sections)
-    rva, code = sig_bytes(image, 't11p2')
-    prepare = ("fake.patch(%d, string.rep('\\0', %d)); fake.patch(%d, '%s')"
-               % (rva, len(code), moved_at, lua_bytes(code)))
-    lua, logs = new_game(['ftl_auto'], image, prepare)
-    f = fake(lua)
-    f.frame_step(1)
-    t = lua.globals().ImpatientDiver._test
-    during = t.state.ready
-    f.frame_step(40)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(not during and t.code().found['t11p2'] == moved_at and status.startswith('OK - 2 feature(s) active')
-          and 'ship_planet_arrival' in status and 'searched for' in status,
-          'moved code is found by a scan spread over frames: %r' % (status.splitlines()[:3],))
-    f.set_now(NOW); f.set_stamp(0x88, NOW - 1000000)
-    f.set_scene(11, 2)
-    f.frame_step(3)
-    check(f.calls_text() == 'update 11 2->3', 'the moved timer check is used (its wait read from the moved code)')
+# the cryo pod: our Helldiver in the pod's loop, then its walk-out (Fast: x8 throughout)
+r = Run()
+r.ship()
+r.T.players = 2
+r.frame(60)
+r.posture(0)
+r.frame()
+check(r.rate() == 8, 'Fast: the cryo pod is sped up')
+r.frame(20)
+r.posture(6)
+r.frame(40)
+check(r.rate() == 8, 'Fast: the walk-out too')
+r.posture(3)
+r.frame()
+check(r.rate() == 1, 'Fast: x1 the frame the Helldiver is out of the cryo pod')
 
-    # 5. Missing code: the arrival check is gone, the FTL still works for the scenes it can verify.
-    lua, logs = new_game(['ftl_auto', 'login_key'], image, "fake.patch(0x117dee2, string.rep('\\0', 17)); "
-                                                          "fake.patch(0x117dbb1, string.rep('\\0', 17)); "
-                                                          "fake.patch(0x116d809, string.rep('\\0', 18))")
-    f = fake(lua)
-    f.frame_step(40)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('PARTIAL - 1 selected feature(s) not available')
-          and 'Log-in ship intro: NOT AVAILABLE, plays normally (its scenes were not found)' in status
-          and 'FTL transition: Automatic (ship_planet_departure, ship_teleporter_network_join)' in status,
-          'missing code disables only what depends on it, and says so: %r' % (status.splitlines(),))
-    f.set_now(NOW); f.set_stamp(0x88, NOW - 100000)
-    f.set_scene(7, 1); f.space = True; f.frame_step(1); f.space = False; f.frame_step(2)
-    check(f.stamp(0x88) == NOW - 100000, 'an unavailable skip never writes')
+# the drop zoom: a click on the drop location map from inside the hellpod; x1 1 s of game time after the loadout page
+r = Run()
+r.ship()
+r.map_page()
+r.in_pod()
+r.frame(60)
+r.frame(click=True)
+check(r.rate() == 8, 'a click on the drop location map speeds the zoom up')
+r.frame(4)                       # 4 frames at x8: 0.53 s of game time
+r.do('T.map.units[#T.map.units + 1] = T.diver({ 1, 2, 3 })')   # the loadout page: its Helldiver
+r.frame(4)
+check(r.rate() == 8, 'still fast in the move into the loadout view')
+r.frame(6)
+check(r.rate() == 1, 'x1 once the move into the loadout view is over')
+r.frame(click=True)
+check(r.rate() == 1, 'a click on the loadout page speeds nothing up')
 
-    # 5b. A scene whose timers changed is left to play; the rest of its option still works.
-    lua, logs = new_game(['login_auto'], image, "fake.patch(0x116d809, string.rep('\\0', 18))")
-    f = fake(lua)
-    f.frame_step(40)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check('Log-in ship intro: Automatic (ship_intro)' in status, 'bridge intro timers changed: only ship_intro skipped')
+# a click on the map with no loadout page after it: x1 after 1.5 s of game time
+r = Run()
+r.ship()
+r.map_page()
+r.in_pod()
+r.frame(60)
+r.frame(click=True)
+r.frame(14)                      # 1.9 s of game time
+check(r.rate() == 1, 'x1 when no loadout page follows the click')
 
-    # 5c. Scene names: a decoy switch found first by the scan is rejected; the real (moved) table is used.
-    real = image[0x117e950:0x117e950 + 30]
+# a click anywhere else speeds nothing up
+r = Run()
+r.ship()
+r.map_page()
+r.frame(60)
+r.frame(click=True)
+r.frame()
+check(r.rate() == 1, 'a click outside the hellpod speeds nothing up')
 
-    def switch_at(rva, table):
-        b = bytearray(real)
-        b[14:18] = (-(rva + 18)).to_bytes(4, 'little', signed=True)   # lea rdx,[image base]
-        b[21:25] = table.to_bytes(4, 'little')
-        return lua_bytes(b)
-    prepare = ("fake.patch(0x117e950, string.rep('\\0', 30)); fake.patch(%d, '%s'); fake.patch(%d, '%s')"
-               % (0x100000, switch_at(0x100000, 0x10), 0x500000, switch_at(0x500000, int.from_bytes(real[21:25], 'little'))))
-    lua, logs = new_game(['pod_auto'], image, prepare)
-    f = fake(lua)
-    f.frame_step(40)
-    t = lua.globals().ImpatientDiver._test
-    check(t.code().found["names"] == 0x500000 and t.derived.scene_ids['ship_teleporter_arrival'] == 13,
-          'a decoy scene-name switch is rejected, the moved real one is used')
+# the ship's first load is scanned at once, even right after another scan: a walk to the bridge that empties the
+# destroyer's world early is still told by the ship's camera
+r = Run()
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame(10)
+r.do('T.keep(T.dest, 6)')
+r.ship()
+r.frame()
+r.do('T.ship.units[1].cam.fov = 0.262')
+r.frame(2)
+r.inside()
+r.frame(5)
+check(r.rate() == 8, 'still fast in a walk that empties the destroyer\'s world 0.2 s after a scan')
 
-    # 5d. A moved signature found twice is not trusted: that skip plays normally.
-    rva, code = sig_bytes(image, 't11p2')
-    prepare = ("fake.patch(%d, string.rep('\\0', %d)); fake.patch(0x500000, '%s'); fake.patch(0x600000, '%s')"
-               % (rva, len(code), lua_bytes(code), lua_bytes(code)))
-    lua, logs = new_game(['ftl_auto'], image, prepare)
-    f = fake(lua)
-    f.frame_step(40)
-    status = (logs / 'ImpatientDiver_STATUS.log').read_text(encoding='utf-8')
-    t = lua.globals().ImpatientDiver._test
-    check(t.code().found['t11p2'] is None and 'ship_planet_arrival' not in status
-          and 'Signature t11p2 (found 2 times)' in (logs / 'ImpatientDiver.log').read_text(encoding='utf-8'),
-          'a signature matching twice is ignored: %r' % (status.splitlines()[:1],))
+# the F9 menu: a row per scene, Off / Fast (x8) / Instant, Instant by default
+r = Run(mode=None)
+check(sorted(r.T.specs.keys()) == sorted(ROWS), 'a row for each scene')
+check(all(r.T.rows[row] == INSTANT and r.T.specs[row].choices[2] == 'Fast (x8)' for row in ROWS),
+      'every row Off / Fast (x8) / Instant, Instant by default')
+check(any('FTL transition Instant' in l for l in r.lines()), 'the start line names each row\'s mode')
 
-    # 5e. Key-press chain into a scene whose option is off: stopped there; fades outside the FTL untouched.
-    lua, logs = new_game(['ftl_key'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_now(NOW); f.set_stamp(0x88, NOW - 1000000)
-    f.set_scene(15, 3)
-    f.space = True; f.frame_step(1); f.space = False; f.frame_step(2)
-    f.calls_text()
-    f.fader(0.5, 1.0)
-    f.set_scene(13, 2); f.set_stamp(0x90, NOW - 200000)
-    f.frame_step(40)
-    check(f.calls_text() == '' and f.stamp(0x90) == NOW - 200000, 'a key chain never enters a scene whose option is off')
-    lua, logs = new_game(['ftl_key', 'pod_key'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_now(NOW); f.set_stamp(0x90, NOW - 200000); f.fader(0.5, 1.0)
-    f.set_scene(13, 2)
-    f.space = True; f.frame_step(1); f.space = False; f.frame_step(3)
-    check(f.fade() == '0.50/1.00', 'the fade is not touched during the pod either')
+# Instant: at x1 the clock jumps 1 s every frame while the FTL plays, no more jumps once it ends
+r.ship()
+r.frame(60)
+r.outside()
+r.frame()
+check(r.speed() == 'jump', 'Instant: the FTL starts jumping, at x1')
+r.frame(5)
+check(r.speed() == 'jump' and r.dt > 1, 'Instant: each frame\'s step has the jump asked in the last')
+r.inside()
+r.frame()
+check(r.speed() == 'x1', 'Instant: no jump asked the frame the FTL ends')
+check(any('SCENE FTL over' in l and '6 jumps' in l for l in r.lines()), 'the scene\'s jumps are logged')
+check(not any(p[1] == 'external_multiplier' and p[2] == 8 for p in
+              (tuple(x.values()) for x in r.T.policy.values())), 'Instant: no x8 asked in a short scene')
+check(len(r.T.notes) == 0, 'Instant: no notice')
 
-    # 5f. A long loading wait never times out: a phase without a step, or a timed phase whose timer is over (it waits
-    #     on loading too); a timed phase whose timer the game keeps resetting does, and an automatic skip that timed out
-    #     is not restarted for the same scene.
-    lua, logs = new_game(['ftl_auto'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_now(NOW)
-    f.set_scene(15, 1)
-    f.frame_step(2600)
-    log = text(logs / 'ImpatientDiver.log')
-    loading = log.count('Skip started (automatic)') == 1 and 'timed out' not in log
-    f.frozen = True
-    f.set_stamp(0x88, NOW - 1000000); f.write(0x20000060, f.le32(3))
-    f.frame_step(2600)
-    log = text(logs / 'ImpatientDiver.log')
-    timer_over = 'timed out' not in log and f.stamp(0x88) == NOW - 5000000
-    f.restamp = True
-    f.frame_step(1400)
-    log = text(logs / 'ImpatientDiver.log')
-    check(loading and timer_over and log.count('Skip started (automatic)') == 1
-          and log.count('Fast-forward timed out (ship_teleporter_network_join phase 3)') == 1,
-          'loading waits never time out (timer over: %r); a phase whose timer keeps resetting does once, and is not '
-          'restarted' % timer_over)
+# Fast shows its notices, x8 and the x1 after it
+r = Run(mode=FAST)
+r.ship()
+r.frame(60)
+r.outside()
+r.frame(10)
+r.inside()
+r.frame()
+check(list(r.T.notes.values()) == ['TIME X8', 'TIME X1'], 'Fast: a notice at x8 and at the x1 after it')
 
-    # 5g. Manual FTL with a slow load: the press is followed through a long wait in the departure (its timer done,
-    #     the next scene still loading) into the arrival, with no second press.
-    lua, logs = new_game(['ftl_key'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_now(NOW); f.set_stamp(0x88, NOW - 1000000)
-    f.frozen = True
-    f.set_scene(12, 3)
-    f.frame_step(5)
-    f.space = True; f.frame_step(1); f.space = False
-    f.frame_step(2500)  # 40 s of loading
-    f.frozen = False
-    f.frame_step(5)
-    slow = f.calls_text()
-    log = text(logs / 'ImpatientDiver.log')
-    check(slow == 'update 12 3->4;update 11 2->3' and 'timed out' not in log and log.count('Skip started') == 1,
-          'one press follows a 40 s load into the arrival: %r' % slow)
+# Instant: at most 20 s jumped in an FTL, then x8 for the rest, and x1 after 45 s of game time
+r = Run(mode=INSTANT)
+r.ship()
+r.frame(60)
+r.outside()
+r.frame()
+r.frame(19)
+check(r.speed() == 'jump', 'Instant: still jumping after 19 s jumped')
+r.frame()
+check(r.speed() == 'x8', 'Instant: x8 once 20 s were jumped')
+r.frame(180)                     # 20.3 + 24.0 s of game time
+check(r.speed() == 'x8', 'Instant: x8 until the cap')
+r.frame(10)
+check(r.speed() == 'x1', 'Instant: x1 after 45 s of game time, jumps in')
+check(len(r.T.notes) == 0, 'Instant: no notice for its x8 or the x1 after it')
 
-    # 5h. A press between two scenes (a loading screen after a Manual scene) carries into the next one; a press a
-    #     frame before a scene starts counts for it; a press long before (or with no Manual scene before) does not.
-    lua, logs = new_game(['ftl_key', 'pod_key'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_now(NOW); f.set_stamp(0x88, NOW - 1000000)
-    f.set_scene(15, 1)  # waits on loading
-    f.frame_step(30)
-    f.set_scene(0, 0)
-    f.frame_step(300)
-    f.space = True; f.frame_step(1); f.space = False
-    f.frame_step(300)
-    f.set_scene(13, 2); f.set_stamp(0x90, NOW - 200000)
-    f.frame_step(40)
-    gap = f.calls_text()
-    log = text(logs / 'ImpatientDiver.log')
-    check(gap == 'update 13 2->3;update 13 3->4;update 13 4->5' and 'Skip started (key press between scenes)' in log,
-          'a press on the loading screen between scenes skips the next one: %r' % gap)
-    lua, logs = new_game(['ftl_key'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_now(NOW)
-    f.space = True; f.frame_step(1); f.space = False
-    f.frame_step(120)
-    f.set_stamp(0x88, NOW - 1000000); f.set_scene(11, 2)
-    f.frame_step(30)
-    early = f.calls_text()
-    lua, logs = new_game(['ftl_key'], image)  # no Manual scene before: only the kept press counts
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_now(NOW)
-    f.space = True; f.frame_step(1); f.space = False
-    f.set_stamp(0x88, NOW - 1000000); f.set_scene(11, 2)
-    f.frame_step(3)
-    late_by_a_frame = f.calls_text()
-    check(early == '' and late_by_a_frame == 'update 11 2->3',
-          'a press 2 s before a scene is not kept %r; one a frame before is %r' % (early, late_by_a_frame))
+# Instant log-in intro: the outside shot jumps 6 s, then x8 while the ship loads; the walk to the bridge jumps again,
+# and its wait for the camera counts paced time, so the jumps don't use it up
+r = Run(mode=INSTANT)
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame()
+check(r.speed() == 'jump', 'Instant: the log-in intro jumps')
+r.frame(5)
+check(r.speed() == 'jump', 'Instant: the outside shot still jumps after 5 s')
+r.frame()
+check(r.speed() == 'x8', 'Instant: x8 once the outside shot jumped 6 s (waiting for the ship)')
+r.frame(30)
+r.do('T.keep(T.dest, 6)')
+r.ship()
+r.frame()
+check(r.speed() == 'jump', 'Instant: the walk to the bridge jumps again')
+r.frame(9)                       # 10 s of game time jumped, 1.3 s paced
+r.do('T.ship.units[1].cam.fov = 0.262')
+r.frame(3)
+check(r.speed() == 'jump', 'Instant: still the log-in intro when the walk starts 10 jumps after the ship loaded')
+r.do('T.ship.units[1].cam.fov = 1.134')
+r.frame()
+check(r.speed() == 'x1', 'Instant: x1 the frame the camera goes wide')
+check(any('the ship is there' in l for l in r.lines()), 'the ship\'s arrival in the log-in intro is logged')
 
-    # 6. Galactic Map Quick Exit: Escape (ESC Closes Galactic Map, On by default) or the Mod Bindings Menu key on the
-    #    map sets the Hologram presenter's close request (the game's presenter manager then closes it); nothing
-    #    elsewhere. Ctrl does nothing. With the option Off, Escape is left to the game (one level back per press).
-    lua, logs = new_game([], image)
-    f = fake(lua)
-    f.frame_step(1)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(status.startswith('OK - 1 feature(s) active') and 'Galactic map quick exit: On (Escape' in status,
-          'map exit on: status says so: %r' % (status.splitlines()[:1],))
-    reads = f.reads
-    f.frame_step(100)
-    check((f.reads - reads) / 100 <= 0.3, 'map closed: %.2f reads per frame' % ((f.reads - reads) / 100))
-    f.set_presenter(15)
-    f.frame_step(11)
-    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.rctrl = True; f.frame_step(1); f.rctrl = False; f.frame_step(3)
-    check(f.close_request() == 0 and 'close requested' not in text(logs / 'ImpatientDiver.log'),
-          'Ctrl on the galactic map: nothing')
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
-    log = text(logs / 'ImpatientDiver.log')
-    check(f.close_request() == 1 and 'Escape on the galactic map: close requested' in log
-          and 'Map key: engine buttons "esc", "escape"' in log,
-          'Escape on the galactic map: close request set')
-    f.clear_request()
-    f.frame_step(5)
-    check(f.close_request() == 0, 'one request per press')
-    f.set_presenter(0)
-    f.frame_step(11)
-    f.escape = True
-    f.set_presenter(15)
-    f.frame_step(12)
-    f.escape = False; f.frame_step(1)
-    check(f.close_request() == 0, 'an Escape held while the map opens does not close it')
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
-    check(f.close_request() == 1, 'the next press does')
-    f.clear_request()
-    f.set_presenter(3)
-    f.frame_step(11)
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(11)
-    check(f.close_request() == 0, 'Escape in another menu: nothing written')
-    # Typing in the chat on the map: Escape (it closes the chat) and the map key are ignored while its input is open.
-    f.set_presenter(15); f.frame_step(11)
-    f.chat(True)
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
-    f.map_key = True; f.frame_step(1); f.map_key = False; f.frame_step(1)
-    typed = f.close_request()
-    f.chat(False)
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
-    log = text(logs / 'ImpatientDiver.log')
-    check(typed == 0 and f.close_request() == 1 and 'Escape on the galactic map ignored: the chat is open' in log
-          and 'Map binding on the galactic map ignored: the chat is open' in log
-          and 'not while typing in the chat' in text(logs / 'ImpatientDiver_STATUS.log'),
-          'chat open on the map: Escape and the map key ignored; chat closed: Escape closes the map')
-    f.clear_request()
-    # ESC Closes Galactic Map Off: Escape is left to the game, the map key still closes it; On again with Escape
-    # held is not a press.
-    f.apply('mapesc', 1)
-    f.frame_step(1)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
-    off_escape = f.close_request()
-    f.map_key = True; f.frame_step(1); f.map_key = False; f.frame_step(1)
-    off_key = f.close_request()
-    f.clear_request()
-    f.escape = True; f.frame_step(1)
-    f.apply('mapesc', 2)
-    f.frame_step(3); f.escape = False; f.frame_step(1)
-    held = f.close_request()
-    f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
-    check(off_escape == 0 and off_key == 1 and held == 0 and f.close_request() == 1
-          and 'ESC Closes Galactic Map is Off' in status and 'ESC Closes Galactic Map set to Off' in text(logs / 'ImpatientDiver.log'),
-          'Off: Escape left to the game (%d), the map key closes it (%d); On with Escape held: no press (%d), the next '
-          'press closes it' % (off_escape, off_key, held))
-    f.clear_request(); f.set_presenter(3); f.frame_step(11)
-    rva, code = sig_bytes(image, 'chat_input')
-    lua, logs = new_game([], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
-    f = fake(lua)
-    f.frame_step(40)
-    f.set_presenter(15); f.frame_step(11)
-    f.chat(True); f.escape = True; f.frame_step(1); f.escape = False; f.frame_step(1)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(f.close_request() == 1 and status.startswith('OK - 1 feature(s) active')
-          and 'the chat check is not available, so typing in the chat counts too' in status,
-          'chat code missing: the map exit still works, without the chat check')
-    lua, logs = new_game([], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.map_key = True; f.frame_step(1); f.map_key = False; f.frame_step(11)
-    check(f.close_request() == 0, 'the map key in another menu: nothing written')
-    f.set_presenter(15)
-    f.frame_step(11)
-    f.map_key = True; f.frame_step(1); f.map_key = False; f.frame_step(1)
-    check(f.close_request() == 1 and 'Map binding on the galactic map: close requested' in text(logs / 'ImpatientDiver.log'),
-          'the Mod Bindings Menu key on the map: close request set')
-    f.clear_request()
-    f.set_presenter(0); f.frame_step(11)
-    f.map_key = True; f.set_presenter(15); f.frame_step(12); f.map_key = False; f.frame_step(1)
-    check(f.close_request() == 0, 'a map key held while the map opens does not close it')
-    rva, code = sig_bytes(image, 'hologram_request')
-    lua, logs = new_game([], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
-    f = fake(lua)
-    f.frame_step(40)
-    f.set_presenter(15)
-    f.frame_step(11)
-    f.ctrl = True; f.frame_step(1); f.ctrl = False; f.frame_step(1)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(f.close_request() == 0 and status.startswith('PARTIAL - 1 selected feature(s)')
-          and 'Galactic map quick exit: NOT AVAILABLE, the map works as normal (code "hologram_request" not found)' in status,
-          'its code missing: the map works as normal: %r' % (status.splitlines()[-1:],))
+# ... and a ship that takes long to load: the outside shot's cap, then the walk to the bridge jumps all the same
+r = Run(mode=INSTANT)
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame(320)                     # 6.1 s jumped, then 41.7 s at x8
+check(r.speed() == 'x1', 'Instant: x1 once the outside shot reached the cap')
+r.do('T.keep(T.dest, 6)')
+r.ship()
+r.frame(2)
+check(r.speed() == 'jump', 'Instant: the walk to the bridge has its own cap')
 
-    # 8. Hellpod entry (Automatic): the local seat moving into a hellpod on the ship has each step's deadline moved to
-    #    now (the game reaches the seat itself), then the briefing's intro timer is expired.
-    lua, logs = new_game(['hellpod_auto'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    v = lua.globals().ImpatientDiver._test['values']
-    check(v.players == 0x3326468 and v.avatar_ref == 0x3a8 and v.entities == 0x346bf98 and v.ent_ids == 0x1e65e4
-          and v.seaters == 0x3326d78 and v.seat_records == 0x48 and v.seat_deadline == 0x28 and v.seat_moving == 0x30
-          and v.seat_clock == 0x3326348 and v.hellpods == 0x3326428 and v.pod_list == 0x68
-          and v.intro_phase == 0x27398c and v.intro_timer == 0x273988,
-          'hellpod entry offsets read from the code')
-    f.set_now(NOW); f.tick = True; f.set_game_state(3)
-    f.frame_step(30)
-    f.calls_text()
-    f.seat_move(f.POD1, 3)
-    f.frame_step(30)
-    calls = f.calls_text()
-    log = text(logs / 'ImpatientDiver.log')
-    check(calls == 'seat reached;briefing ui' and f.seat_frames is not None and f.seat_frames <= 15
-          and f.ui_frames is not None and f.ui_frames <= 20
-          and 'Hellpod entry: skip started (automatic)' in log and 'Hellpod entry: briefing intro skipped' in log,
-          'hellpod entry: seat in %r frames, briefing UI in %r frames (naturally 3 s + 2 s): %r'
-          % (f.seat_frames, f.ui_frames, calls))
-    # Leaving the hellpod (the seat was taken: an exit), another seat, or a seat move off the ship: left alone.
-    f.set_presenter(0); f.write(0x2b000000, f.le32(0))
-    f.frame_step(20); f.calls_text()
-    f.seat_move(f.POD1, 2)  # still in the pod: moving out
-    f.frame_step(150)
-    exit_frames = f.seat_frames
-    f.seat_free(); f.frame_step(20); f.calls_text()
-    f.seat_move(0xc0c0, 2)  # not a hellpod
-    f.frame_step(150)
-    other_frames = f.seat_frames
-    f.seat_free(); f.set_game_state(4); f.frame_step(20); f.calls_text()
-    f.seat_move(f.POD2, 2)  # in a mission
-    f.frame_step(150)
-    mission_frames = f.seat_frames
-    check(all(n is not None and n >= 120 for n in (exit_frames, other_frames, mission_frames)),
-          'an exit, another seat and a mission seat play normally: %r frames' % ([exit_frames, other_frames, mission_frames],))
+# Instant drop zoom: the wait for the loadout page counts paced time; the camera's move into it game time
+r = Run(mode=INSTANT)
+r.ship()
+r.map_page()
+r.in_pod()
+r.frame(60)
+r.frame(click=True)
+check(r.speed() == 'jump', 'Instant: the drop zoom jumps')
+r.frame(2)                       # 2 s of game time jumped, 0.27 s paced
+check(r.speed() == 'jump', 'Instant: still waiting for the loadout page after 2 jumps')
+r.do('T.map.units[#T.map.units + 1] = T.diver({ 1, 2, 3 })')   # the loadout page: its Helldiver
+r.frame()
+check(r.speed() == 'jump', 'Instant: jumping through the move into the loadout view')
+r.frame()
+check(r.speed() == 'x1', 'Instant: x1 a jump after the loadout page opened')
 
-    # 8c. The seat wait's code missing: the hellpod entry is unavailable and the seat plays normally.
-    rva, code = sig_bytes(image, 'seat_wait')
-    lua, logs = new_game(['hellpod_auto'], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
-    f = fake(lua)
-    f.frame_step(40)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    f.set_now(NOW); f.tick = True; f.set_game_state(3); f.frame_step(30)
-    f.seat_move(f.POD1, 2)
-    f.frame_step(150)
-    check('Hellpod to loadout: NOT AVAILABLE, plays normally (code "seat_wait" not found)' in status
-          and f.seat_frames is not None and f.seat_frames >= 120,
-          'seat code missing: the entry plays normally: %r' % (status.splitlines()[-3:],))
+# Instant hellpod entry, and no more jumps once a mission starts
+r = Run(mode=INSTANT)
+r.ship()
+r.frame(60)
+r.posture(15)
+r.frame()
+check(r.speed() == 'jump', 'Instant: the hellpod entry jumps')
+r.in_pod()
+r.frame()
+check(r.speed() == 'x1', 'Instant: no jump once the Helldiver is in the hellpod')
+r.outside()
+r.frame(3)
+r.T.mission = True
+r.frame()
+check(r.speed() == 'x1', 'Instant: no jump the frame a mission starts')
 
-    # 8d. The avatar lookup calls a function other than the resolver found: the hellpod entry is off.
-    rel = (0xfd9bb0 - 0x4db78e).to_bytes(4, 'little', signed=True)
-    lua, logs = new_game(['hellpod_auto'], image, "fake.patch(%d, '%s')" % (0x4db78a, lua_bytes(rel)))
-    f = fake(lua)
-    f.frame_step(40)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check('Hellpod to loadout: NOT AVAILABLE, plays normally (the avatar lookup calls another resolver)' in status,
-          'the avatar lookup must call the resolver found: %r' % (status.splitlines()[-3:],))
+# Instant cryo pod (not host): jumps in the pod's loop; the walk-out's first 30 frames at x8 (the game places the
+# Helldiver), then jumps again
+r = Run(mode=INSTANT)
+r.ship()
+r.T.players = 2
+r.T.host = False
+r.frame(60)
+r.posture(0)
+r.frame()
+check(r.speed() == 'jump', 'Instant: the cryo pod jumps')
+r.frame(3)
+r.posture(6)
+r.frame()
+check(r.speed() == 'x8', 'Instant: the walk-out starts at x8')
+r.frame(29)
+check(r.speed() == 'x8', 'Instant: 30 frames of the walk-out at x8')
+r.frame()
+check(r.speed() == 'jump', 'Instant: jumps again after them')
+r.posture(3)
+r.frame()
+check(r.speed() == 'x1', 'Instant: x1 once out of the cryo pod')
+check(any('cryo pod: the walk-out after' in l for l in r.lines()), 'the walk-out is logged')
 
-    # 8f. Drop location zoom (Automatic): a pick on the map sets the zoom's progress to 1, so the loadout page opens at
-    #     once; going back to the map (the zoom going back to 0) is left alone, and a second pick is skipped again;
-    #     without a drop group, or outside the briefing, nothing is written.
-    lua, logs = new_game(['zoom_auto'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    v = lua.globals().ImpatientDiver._test['values']
-    check(v.zoom_group == 0x3326aa0 and v.zoom_players == 0x4ec0 and v.zoom_target == 0x2739c4
-          and v.zoom_progress == 0x4f64 and v.page == 8, 'drop location zoom offsets read from the code')
-    f.open_loadout(0)
-    f.frame_step(30); f.calls_text()
-    f.pick_drop()
-    f.frame_step(5)
-    skipped = (f.calls_text(), f.zoom_frames)
-    f.back_to_map()
-    f.frame_step(20)
-    going_back = f.zoom_progress()
-    f.frame_step(60)
-    f.calls_text()
-    f.pick_drop()
-    f.frame_step(5)
-    again = (f.calls_text(), f.zoom_frames)
-    log = text(logs / 'ImpatientDiver.log')
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check('Drop location zoom: Automatic (map zoom)' in status and skipped == ('loadout page', 1)
-          and 0.6 < going_back < 0.8 and again == ('loadout page', 1)
-          and log.count('Drop location zoom: ended at 0.0') == 2 and 'loadout page 1 frames after the skip' in log,
-          'drop location zoom ended at once %r, back to the map untouched (%.2f), skipped again %r'
-          % (skipped, going_back, again))
-    f.back_to_map(); f.frame_step(80); f.calls_text()
-    f.write(0x2e004ec0, f.le32(0))  # no players in the drop group: the synced progress
-    f.pick_drop(); f.frame_step(5)
-    client = (f.calls_text(), f.zoom_frames)
-    f.back_to_map(); f.write(0x2e55f680, f.f32(0)); f.frame_step(5); f.calls_text()
-    f.write(0x2c0027fe, '\1')  # ... but a screen with its +0x27fe byte set doesn't wait on it
-    f.pick_drop(); f.frame_step(5)
-    no_group = (f.calls_text(), f.zoom_synced(), f.zoom_progress())
-    f.write(0x2c0027fe, '\0')
-    f.write(0x2e004ec0, f.le32(1))
-    f.back_to_map(); f.write(0x2e004f64, f.f32(0)); f.frame_step(5)
-    f.set_presenter(0); f.frame_step(20)
-    f.pick_drop(); f.frame_step(30)
-    closed = f.zoom_progress()
-    f.open_loadout(1); f.write(0x2e004f64, f.f32(0)); f.frame_step(30)
-    log = text(logs / 'ImpatientDiver.log')
-    check(client == ('loadout page', 1) and 'Drop location zoom: ended at 0.00 (synced)' in log
-          and 'Zoom state' not in log,
-          'without players in the drop group, the synced progress is ended: %r' % (client,))
-    check(no_group[0] == '' and no_group[1] < 0.2 and closed == 0.0
-          and log.count('Drop location zoom: ended at') == 3,
-          'a leading screen without players %r, outside the briefing %r or on the loadout page: nothing written'
-          % (no_group, closed))
+# rows: Off leaves its scene alone (and only it), Fast is x8 without jumps, a change counts the next frame
+r = Run(mode=INSTANT)
+r.set('ftl', OFF)
+r.ship()
+r.frame(60)
+r.outside()
+r.frame(30)
+check(r.speed() == 'x1', 'an FTL set Off plays at x1')
+check(any('OPTION FTL transition: Off' in l for l in r.lines()), 'a row change is logged')
+r.inside()
+r.frame(30)
+r.posture(15)
+r.frame()
+check(r.speed() == 'jump', 'the hellpod entry still jumps with the FTL Off')
+r.in_pod()
+r.frame(30)
+r.set('ftl', FAST)
+r.outside()
+r.frame(5)
+check(r.speed() == 'x8', 'an FTL set Fast runs at x8 without jumps')
+r.set('ftl', INSTANT)
+r.frame()
+check(r.speed() == 'jump', 'Fast to Instant mid-scene: jumps at x1')
+r.set('ftl', OFF)
+r.frame()
+check(r.speed() == 'x1', 'Off mid-scene: x1 and no jump')
 
-    # 8g. Drop location zoom Off: never touched, whatever the key.
-    lua, logs = new_game([], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.open_loadout(0); f.frame_step(30)
-    f.pick_drop(); f.frame_step(5)
-    f.space = True; f.frame_step(1); f.space = False; f.frame_step(80)
-    off = f.zoom_frames
-    check(off is not None and off >= 60, 'drop location zoom Off: plays in %r frames' % off)
+# what is logged: the Helldiver, its posture, what a small world shows
+r = Run()
+r.ship()
+r.frame(60)
+before = len(r.T.log)
+r.posture(3)
+r.frame()
+check(any(' ANIM L14 36>3' in l for l in r.lines(before)), 'a posture change is logged at once')
+check(any('HELLDIVER the only one, solo (1 in main world' in l for l in r.lines()), 'our Helldiver is found')
+before = len(r.T.log)
+r.map_page()
+r.frame()
+check(any('WORLD 3 (20 units) shows the map floor' in l for l in r.lines(before)), 'a small world\'s marker is logged')
 
-    # 8h. The zoom's code missing: the zoom is unavailable and plays normally.
-    rva, code = sig_bytes(image, 'zoom_ramp')
-    lua, logs = new_game(['zoom_auto'], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
-    f = fake(lua)
-    f.frame_step(40)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    f.open_loadout(0); f.frame_step(30)
-    f.pick_drop(); f.frame_step(80)
-    check('Drop location zoom: NOT AVAILABLE, plays normally (code "zoom_ramp" not found)' in status
-          and f.zoom_frames is not None and f.zoom_frames >= 60,
-          'zoom code missing: the zoom plays normally: %r' % (status.splitlines()[-2:],))
+# a lobby change: the destroyer's small outside world shows its cannons while the old ship is still the main world
+#  second join): sped up as it begins over our ship, as the old ship empties and while the next one loads
+# (x8 once the jumps are spent), with jumps again once it has loaded under the shot (the FTL's row); no FTL
+r = Run(mode=INSTANT)
+r.ship()
+r.frame(60)
+r.outside(17)
+r.frame(2)
+check(r.speed() == 'jump', 'a lobby change\'s small outside shot over our loaded ship: sped up')
+r.do('T.keep(T.ship, 3); T.main = T.dest')
+r.frame(30)
+check(r.speed() == 'x8', 'x8 while the next ship loads, the jumps spent')
+r.ship()
+r.frame()
+check(r.speed() == 'jump' and any('lobby change: the next ship is there' in l for l in r.lines()),
+      'a lobby change: jumps again once the next ship has loaded under the outside shot')
+r.do('T.main = T.dest')
+r.frame()
+r.do('T.main = T.ship')
+r.frame()
+check(r.speed() == 'jump', 'still while the main world swaps between the two ')
+r.inside()
+r.frame()
+check(r.speed() == 'x1' and any('SCENE lobby change over' in l for l in r.lines())
+      and not any('SCENE FTL' in l for l in r.lines()), 'x1 the frame the cannons go; no FTL')
+r.frame(60)
+r.outside(28)
+r.do('T.main = T.dest')
+r.frame(5)
+check(r.speed() == 'x1', 'a small outside shot later, the main one, the same ship still loaded: no lobby change')
 
-    # 9. After a mission, with every skip Automatic and the key pressed: the extraction, the elevator ride, the wait
-    #    after it and the mission end screen all play on their own time (no mission return skip).
-    lua, logs = new_game(['login_auto', 'pod_auto', 'ftl_auto', 'hellpod_auto'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_now(NOW); f.set_stamp(0x88, NOW - 100000)
-    calls, stamps = [], []
-    for scene in (1, 9, 8):
-        f.set_stamp(0x88, NOW - 100000); f.set_scene(scene, 1)
-        f.frame_step(5)
-        f.space = True; f.frame_step(1); f.space = False; f.frame_step(40)
-        calls.append(f.calls_text()); stamps.append(f.stamp(0x88))
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check(calls == ['', '', ''] and stamps == [NOW - 100000] * 3 and 'Mission return' not in status
-          and 'MissionEnd' not in text(logs / 'ImpatientDiver.log'),
-          'scenes after a mission are left alone: %r %r' % (calls, stamps))
+# joining from the galactic map : the small shot over our loaded ship, then an FTL whose world shrinks
+# for the arrival but keeps its cannons: both sped up to their ends
+r = Run(mode=INSTANT)
+r.ship()
+r.frame(60)
+r.outside(25)
+r.frame()
+check(r.speed() == 'jump', 'joining: the small shot over our ship is sped up')
+r.inside()
+r.frame()
+check(r.speed() == 'x1', 'x1 once its cannons go')
+r.outside()
+r.frame(3)
+check(r.speed() == 'jump', 'joining: its FTL is sped up')
+r.do('for i = 1, 500 do table.remove(T.dest.units, 2).alive = false end')   # 90 units left, the cannons with them
+r.frame(2)
+check(r.speed() == 'jump', 'still sped up as the FTL\'s world shrinks for the arrival')
+check(not any('SCENE FTL over' in l for l in r.lines()), 'the FTL is not over before its cannons go')
+r.inside()
+r.frame()
+check(r.speed() == 'x1', 'x1 once the arrival\'s cannons go')
 
-    # 10. Intro cinematics (Automatic). Before the title screen: the game's no-intro flag is set, so the title screen
-    #     starts without the videos (and goes on at once, as on a return to the title); the flag is put back once
-    #     the title screen has started.
-    lua, logs = new_game(['intro_auto'], image)
-    f = fake(lua)
-    f.frame_step(3)
-    v = lua.globals().ImpatientDiver._test['values']
-    check(v.intro_flag == 0x106f and v.title_no_intro == 0x10 and v.states == 0x3326e68 and v.title_type == 0xb8
-          and v.title_count == 0x2590 and v.title_entries == 0x2598 and v.title_set_up == 0x144
-          and v.title_has_player == 0x145 and v.title_queued == 0x146 and v.title_setup == 0xad5cf0,
-          'intro offsets read from the code')
-    flag_before = f.flag()
-    f.title_enter()
-    f.frame_step(200)
-    log = text(logs / 'ImpatientDiver.log')
-    check(flag_before == 1 and f.calls_text() == 'title start' and f.flag() == 0
-          and f.title_byte(0x145) == 0 and f.title_byte(0x146) == 0
-          and 'Intro cinematics: no-intro flag set before the title screen' in log
-          and 'the title screen started without them, from the no-intro flag' in log and 'another game object' not in log
-          and "no-intro flag put back (the title screen has started)" in log,
-          'intro: the flag set before the title screen, no video player, flag put back: %r'
-          % ([l for l in log.splitlines() if 'Intro' in l],))
-    # Back to the title later without the game's own skip: the byte is set on the title screen.
-    f.title_exit(); f.frame_step(20)
-    f.title_enter(); f.frame_step(200)
-    again = f.calls_text()
-    f.title_exit(); f.frame_step(20)
-    f.title_enter(True); f.frame_step(200)
-    back = f.calls_text()
-    log = text(logs / 'ImpatientDiver.log')
-    check(again == '' and back == 'title start' and f.flag() == 0 and 'Intro cinematics: title screen closed' in log
-          and log.count('no-intro set on the title screen') == 1 and 'started without them, on its own' in log,
-          'a later title screen: no videos either %r; a return to the title is left to the game %r' % (again, back))
+# ... left alone with the FTL's row Off, and back from a mission (the ship loads under an outside shot too)
+r = Run(mode=INSTANT)
+r.set('ftl', OFF)
+r.ship()
+r.frame(60)
+r.outside(17)
+r.do('T.keep(T.ship, 3); T.main = T.dest')
+r.frame(30)
+r.ship()
+r.frame(5)
+check(r.speed() == 'x1', 'a lobby change with the FTL transition Off: x1')
+r = Run(mode=INSTANT)
+r.ship()
+r.frame(60)
+r.T.mission = True
+r.do('T.keep(T.ship, 3); T.main = T.dest')
+r.outside(17)
+r.frame(60)
+r.T.mission = False
+r.frame(30)
+r.ship()
+r.frame(30)
+check(r.speed() == 'x1', 'the return from a mission: a ship loaded under the outside shot, not sped up')
 
-    # 10b. The title screen already up when the mod starts (its start missed the flag): the byte is set before the
-    #      setup, so no video player is built and nothing is queued; the flag is never touched.
-    lua, logs = new_game(['intro_auto'], image, 'fake.title_enter()')
-    f = fake(lua)
-    f.frame_step(200)
-    log = text(logs / 'ImpatientDiver.log')
-    check(f.calls_text() == '' and f.title_byte(0x10) == 1 and f.title_byte(0x145) == 0 and f.flag() == 0
-          and 'no-intro set on the title screen' in log and 'another game object' not in log,
-          'intro: set on a title screen already up, before its setup: %r' % ([l for l in log.splitlines() if 'Intro' in l],))
+# joining a lobby whose players are in their hellpods: every Helldiver plays the stepping-in clip at once ;
+# ours not known, a posture every player's Helldiver shares is ours too
+r = Run(mode=INSTANT)
+r.T.sync = None
+r.ship()
+r.frame(60)
+r.do('T.me.alive = false; for i, u in ipairs(T.ship.units) do if u == T.me then table.remove(T.ship.units, i) break end end')
+r.T.host = False
+r.T.players = 3
+r.do('T.a = T.diver({ 1, 2, 3, 4, 5, 6, 7, 8, 59, 10, 11, 12, 13, 36, 0 }, 2, 5, 5); '
+     'T.b = T.diver({ 1, 2, 3, 4, 5, 6, 7, 8, 59, 10, 11, 12, 13, 36, 0 }, 3, 9, 9); '
+     'T.ship.units[#T.ship.units + 1] = T.a; T.ship.units[#T.ship.units + 1] = T.b')
+r.frame(40)
+r.do('T.a.anim[14] = 15; T.b.anim[14] = 15')
+r.frame(5)
+check(r.speed() == 'x1', 'two players\' Helldivers stepping in, ours not aboard yet: nothing sped up')
+r.do('T.me = T.diver({ 1, 2, 3, 4, 5, 6, 7, 8, 59, 10, 11, 12, 13, 36, 0 }, 1); T.ship.units[#T.ship.units + 1] = T.me')
+r.frame(40)
+check(r.speed() == 'x1', 'ours aboard, not stepping in: nothing sped up')
+r.posture(15)
+r.frame()
+check(r.speed() == 'jump' and any('ANIM all 3 Helldivers L14 15' in l for l in r.lines()),
+      'every player\'s Helldiver stepping in: sped up')
+r.do('T.a.anim[14] = 17; T.b.anim[14] = 17')
+r.in_pod()
+r.frame()
+check(r.speed() == 'x1', 'x1 once they are all in their hellpods')
 
-    # 10c. Too late (the videos already queued): nothing written.
-    lua, logs = new_game(['intro_auto'], image, 'fake.title_enter(); fake.load_frames = 0')
-    f = fake(lua)
-    f.frame_step(30)
-    log = text(logs / 'ImpatientDiver.log')
-    check(f.calls_text() == 'video player;intro videos' and f.title_byte(0x10) == 0 and f.flag() == 0
-          and 'too late, the videos were already queued' in log, 'intro: too late, nothing written')
+# a client's FTL: the destroyer's big outside world is the main one for a while ; the FTL is sped up, and
+# ours stays known through it, so its hellpod entry after the FTL is sped up
+r = Run(mode=INSTANT)
+r.T.sync = None
+r.ship()
+r.frame(60)
+r.T.players = 2
+r.T.host = False
+r.friend()
+r.frame(60)
+r.outside()
+r.do('T.main = T.dest')
+r.frame()
+check(r.speed() == 'jump', 'a client\'s FTL, its outside world the main one: sped up')
+r.frame(5)
+check(not any('ours gone' in l for l in r.lines()) and any('kept in world 1' in l for l in r.lines()),
+      'ours kept while the FTL\'s world is the main one')
+r.inside()
+r.do('T.main = T.ship')
+r.frame(30)
+r.posture(15)
+r.frame()
+check(r.speed() == 'jump', 'ours kept through the FTL: its hellpod entry is sped up')
 
-    # 10d. Off: the videos play; switched Off after the flag was set (before the title screen): the flag is put back.
-    lua, logs = new_game([], image)
-    f = fake(lua)
-    f.frame_step(3)
-    f.title_enter(); f.frame_step(200)
-    check(f.calls_text() == 'video player;intro videos' and f.flag() == 0 and f.title_byte(0x10) == 0,
-          'intro Off: the videos play')
-    lua, logs = new_game(['intro_auto'], image)
-    f = fake(lua)
-    f.frame_step(3)
-    set_first = f.flag()
-    f.apply('intro', 1); f.frame_step(2)
-    f.title_enter(); f.frame_step(200)
-    check(set_first == 1 and f.flag() == 0 and f.calls_text() == 'video player;intro videos'
-          and 'no-intro flag put back (switched off)' in text(logs / 'ImpatientDiver.log'),
-          'intro switched Off before the title screen: flag put back, the videos play')
+# ours is let go when its world no longer holds the ship (a lobby change; a handle left alive counts for nothing),
+# and in a mission
+r = Run()
+r.ship()
+r.frame(60)
+r.do('T.keep(T.ship, 3); T.me.alive = true; T.main = T.map')
+r.frame(5)
+check(any('ours gone (its world no longer holds the ship)' in l for l in r.lines()), 'ours let go when the ship empties')
+r = Run()
+r.ship()
+r.frame(60)
+r.T.mission = True
+r.frame()
+check(any('ours gone (a mission)' in l for l in r.lines()), 'ours let go in a mission')
 
-    # 10e. The game's flag already set (by the game itself): left alone, never cleared.
-    lua, logs = new_game(['intro_auto'], image, "fake.write(0x2500106f, '\\1')")
-    f = fake(lua)
-    f.frame_step(3)
-    f.title_enter(); f.frame_step(30)
-    check(f.calls_text() == 'title start' and f.flag() == 1
-          and "the game's no-intro flag is already set (1); left alone" in text(logs / 'ImpatientDiver.log'),
-          'intro: a flag the game set itself is left alone')
+# ours is taken on the ship only (not a Helldiver in a small main world)
+r = Run()
+r.do('T.map.units[#T.map.units + 1] = T.diver({ 1, 2, 3 }); T.main = T.map')
+r.frame(30)
+check(not any('the only one, solo' in l for l in r.lines()), 'no Helldiver taken off the ship')
 
-    # 10e'. The mod starting on the ship (no title screen to come): the flag is never set; set, and the game reaching the
-    #       ship without a title screen: put back.
-    lua, logs = new_game(['intro_auto'], image, 'fake.set_game_state(3)')
-    f = fake(lua)
-    f.frame_step(30)
-    on_ship = (f.flag(), 'no title screen before game state 3; nothing to do' in text(logs / 'ImpatientDiver.log'))
-    lua, logs = new_game(['intro_auto'], image)
-    f = fake(lua)
-    f.frame_step(3)
-    set_first = f.flag()
-    f.set_game_state(3); f.frame_step(3)
-    check(on_ship == (0, True) and set_first == 1 and f.flag() == 0
-          and 'flag put back (the game went on without a title screen)' in text(logs / 'ImpatientDiver.log'),
-          'intro: never set on the ship %r; put back if the game gets there without a title screen' % (on_ship,))
+# with other players in the session the drop zoom waits for them: a click on the map speeds nothing up ;
+# the click, the cameras that move and the other Helldivers' postures are logged
+r = Run(mode=INSTANT)
+r.T.sync = None
+r.ship()
+r.frame(60)
+r.T.players = 2
+r.friend()
+r.map_page()
+r.in_pod()
+r.frame(60)
+r.frame(click=True)
+r.frame(5)
+check(r.speed() == 'x1' and not any('SCENE drop zoom' in l for l in r.lines()),
+      'other players aboard: a click on the drop map speeds nothing up')
+r.do('T.other.anim[14] = 15')
+r.frame(2)
+check(any('ANIM other 1 L14 3>15' in l for l in r.lines()), 'another Helldiver\'s posture is logged')
+check(r.speed() == 'x1', 'and speeds nothing up')
 
-    # 10f. Mod Options Menu loading after this addon: the intro waits for its setting (Off here); without the menu
-    #      the default (Automatic) applies after the wait.
-    lua, logs = new_game(['intro_off'], image, menu=False)
-    f = fake(lua)
-    f.frame_step(30)
-    waited = f.flag()
-    lua.execute('ModOptionsMenu = fake.option_menu')
-    f.frame_step(100)
-    later_off = f.flag()
-    lua, logs = new_game([], image, menu=False)
-    f = fake(lua)
-    f.frame_step(30)
-    early = f.flag()
-    f.frame_step(40)
-    check(waited == 0 and later_off == 0 and early == 0 and f.flag() == 1,
-          'intro: waits for a menu that loads later (%d %d); without it, Automatic after the wait (%d %d)'
-          % (waited, later_off, early, f.flag()))
+# Instant cryo pod: the wait in the pod jumps up to 12 s, then x8 (after joining it waits for loading: 2.3 to 3.5 s
+# real whether 16 or 40 s were jumped, , not capped by 3.4 s real of it; the walk-out has
+# jumps and a cap of its own
+r = Run(mode=INSTANT)
+r.ship()
+r.T.players = 2
+r.T.host = False
+r.frame(60)
+r.posture(0)
+r.frame()
+r.frame(10)
+check(r.speed() == 'jump', 'Instant: the cryo pod still jumps after 10 s')
+r.frame(2)
+check(r.speed() == 'x8', 'Instant: x8 once 12 s were jumped in the pod')
+r.frame(225)                     # 3.75 s real at x8: the scene's game time past 42 s
+check(r.speed() == 'x8', 'Instant: still x8 after 3.7 s real in the pod (no cap)')
+r.posture(6)
+r.frame(30)
+check(r.speed() == 'x8', 'Instant: the walk-out\'s 30 frames at x8')
+r.frame()
+check(r.speed() == 'jump', 'Instant: then jumps of its own, past the wait\'s cap')
+r.posture(3)
+r.frame()
+check(r.speed() == 'x1', 'Instant: x1 once out of the cryo pod')
 
-    # 10g. Code missing or moved: the intro plays and nothing is written.
-    rva, code = sig_bytes(image, 'title_setup')
-    lua, logs = new_game(['intro_auto'], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
-    f = fake(lua)
-    f.frame_step(40)
-    f.title_enter(); f.frame_step(200)
-    status = text(logs / 'ImpatientDiver_STATUS.log')
-    check('Intro cinematics: NOT AVAILABLE, plays normally (code "title_setup" not found)' in status
-          and f.flag() == 0 and f.calls_text() == 'video player;intro videos', 'intro code missing: the videos play')
-    rel = (0xad7000 - (0xad7d81 + 5)).to_bytes(4, 'little', signed=True)
-    lua, logs = new_game(['intro_auto'], image, "fake.patch(%d, '%s')" % (0xad7d82, lua_bytes(rel)))
-    f = fake(lua)
-    f.frame_step(40)
-    check('Intro cinematics: NOT AVAILABLE, plays normally (the title setup moved)'
-          in text(logs / 'ImpatientDiver_STATUS.log') and f.flag() == 0,
-          'intro: the update calling another setup turns it off')
+# joining on the same planet : the old ship empties as the destroyer's small shot shows its cannons;
+# sped up from then, through the next ship's load, to the cannons' end
+r = Run(mode=INSTANT)
+r.ship()
+r.frame(60)
+r.outside(25)
+r.do('T.main = T.dest')
+r.frame(15)
+r.do('T.keep(T.ship, 3)')
+r.frame()
+check(r.speed() == 'jump', 'joining: sped up as the old ship empties under the outside shot')
+r.frame(60)
+r.ship()
+r.do('T.main = T.ship')
+r.frame()
+check(r.speed() == 'jump', 'joining: jumps again once the next ship is there')
+r.inside()
+r.frame()
+check(r.speed() == 'x1', 'joining: x1 once the cannons go')
 
-    # 11. Ship walk speed boost (On): on the ship the local Helldiver's private movement record gets every speed
-    #     tripled, up to the game's cap (10 m/s); the direction factor, swimming, stamina and other Helldivers' records
-    #     are untouched; put back when switched off or off the ship; never in a mission.
-    lua, logs = new_game(['shipspeed_on'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    reads = f.reads
-    f.frame_step(150)
-    off_ship = (f.reads - reads) / 150  # the scene polling, and the game state every few frames
-    v = lua.globals().ImpatientDiver._test['values']
-    check(v.avatars == 0x3326d20 and v.copy_map == 0x547c70 and v.copies == 0x547d24 and v.speed_walk == 0xc
-          and v.speed_jog == 0x10 and v.speed_sprint == 0x14 and v.speed_crouch_sprint == 0x28 and v.speed_prone == 0x2c
-          and v.speed_aim == 8 and v.speed_resolver == 0x508db0 and v.speed_cap == 0x23c7554,
-          'speed boost offsets read from the code')
-    BOOSTED = {0x8: 6.0, 0xc: 4.5, 0x10: 10.0, 0x14: 10.0, 0x18: 10.0, 0x1c: 3.6, 0x20: 4.5, 0x24: 6.75, 0x28: 10.0,
-               0x2c: 4.5, 0x4: 0.75, 0x30: 1.5, 0x34: 23.0}
-    SHIP = {k: v for k, v in f.SHIP.items()}
+# a client's hellpod entry: after the clip the camera holds its close-up on the pod (fov 0.611), then pulls out to the
+# drop location map (1.222); sped up until the map's view, with jumps of its own; 10 s of game time at most
+r = Run(mode=INSTANT)
+r.ship()
+r.frame(60)
+r.T.players = 2
+r.T.host = False
+r.posture(15)
+r.frame(8)
+r.in_pod(0.611)
+r.frame()
+check(r.speed() == 'jump' and any('hellpod entry: in the hellpod after' in l and 'fov 0.611' in l for l in r.lines()),
+      'a client in the hellpod, the camera\'s close-up on the pod: still sped up')
+r.frame(5)
+check(r.speed() == 'jump', 'the close-up has jumps of its own (the clip spent 9 of 12)')
+r.do('T.ship.units[1].cam.fov = 1.0')
+r.frame()
+check(r.speed() == 'x8', 'x8 while it pulls out, its jumps spent')
+r.do('T.ship.units[1].cam.fov = 1.222')
+r.frame()
+check(r.speed() == 'x1', 'x1 once the camera is on the drop location map')
+r = Run(mode=INSTANT)
+r.ship()
+r.frame(60)
+r.posture(15)
+r.frame(3)
+r.in_pod(0.611)
+r.frame(80)                      # 6 jumps, then 74 frames at x8: past 10 s of game time
+check(r.speed() == 'x1' and any('SCENE hellpod entry over' in l for l in r.lines()),
+      'a close-up longer than 10 s of game time: x1')
 
-    def speeds(index, expected):
-        return all(abs(f.speed(index, off) - value) < 1e-4 for off, value in expected.items())
-    f.set_game_state(3)
-    f.spawn_copy(f.OTHER, 0); f.spawn_copy(f.AVATAR, 1)
-    f.frame_step(30)
-    log = text(logs / 'ImpatientDiver.log')
-    check(speeds(1, BOOSTED) and speeds(0, SHIP)
-          and 'Ship walk speed boost: on, entity %d (walk 1.50 -> 4.50, jog 4.08 -> 10.00, sprint 5.50 -> 10.00 m/s; '
-              'cap 10)' % f.AVATAR in log,
-          'speed boost: the local record tripled up to the cap, the other one untouched: %r'
-          % ([round(f.speed(1, o), 2) for o in sorted(BOOSTED)],))
-    reads = f.reads
-    f.frame_step(150)
-    log = text(logs / 'ImpatientDiver.log')
-    boosted_cost = (f.reads - reads) / 150 - off_ship
-    check(log.count('Ship walk speed boost: on,') == 1 and boosted_cost < 0.3,
-          'kept without writing again: %.2f reads per frame for the boost' % boosted_cost)
-    f.spawn_copy(f.AVATAR, 1)  # the game makes the record again (a respawn on board)
-    f.frame_step(30)
-    check(speeds(1, BOOSTED) and text(logs / 'ImpatientDiver.log').count('Ship walk speed boost: on,') == 2,
-          'a record made again is boosted again (never compounded)')
-    f.apply('shipspeed', 1); f.frame_step(30)
-    off = speeds(1, SHIP)
-    f.apply('shipspeed', 2); f.frame_step(30)
-    on_again = speeds(1, BOOSTED)
-    f.set_game_state(4); f.frame_step(30)
-    left = speeds(1, SHIP)
-    f.spawn_copy(f.AVATAR, 2)  # a mission Helldiver with a private record
-    f.frame_step(60)
-    log = text(logs / 'ImpatientDiver.log')
-    check(off and on_again and left and speeds(2, SHIP) and speeds(0, SHIP)
-          and 'speeds put back (switched off)' in log and 'speeds put back (left the ship)' in log,
-          'speeds put back when switched off (%r) and off the ship (%r); a mission record untouched' % (off, left))
+# the host's drop zoom with a friend aboard: a click on the map as the friend steps in; sped up once every player's
+# Helldiver is in its hellpod, until the camera's move into the loadout view is over; once a stay in the pod
+r = Run(mode=INSTANT)
+r.T.sync = None
+r.ship()
+r.frame(60)
+r.T.players = 2
+r.friend()
+r.map_page()
+r.in_pod()
+r.do('T.other.anim[14] = 15')
+r.frame(30)
+r.frame(click=True)
+r.frame(5)
+check(r.speed() == 'x1', 'host: a click while the friend steps in speeds nothing up yet')
+r.do('T.other.anim[14] = 17')
+r.frame()
+check(r.speed() == 'jump', 'host: the zoom jumps once every Helldiver is in its hellpod')
+r.frame()
+check(r.speed() == 'jump', 'still while the camera rests on the map')
+r.do('T.ship.units[1].cam.y = 0.1')
+r.frame()
+check(r.speed() == 'jump' and any('drop zoom: the camera moves into the loadout view' in l for l in r.lines()),
+      'jumping through the camera\'s move into the loadout view')
+r.frame()
+check(r.speed() == 'x1', 'x1 a jump after the camera began its move')
+r.frame(click=True)
+r.frame()
+check(r.speed() == 'x1', 'a click on the loadout page speeds nothing up')
+r.in_pod()
+r.posture(16)
+r.frame(5)
+r.in_pod()
+r.frame(5)
+r.frame(click=True)
+check(r.speed() == 'jump', 'in the pod again: a new click, every Helldiver in: the zoom again')
 
-    # 11a. The game makes the record again with other values, and the option is switched off before the next look:
-    #      that record is the game's, so nothing is put back into it.
-    lua, logs = new_game(['shipspeed_on'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_game_state(3); f.spawn_copy(f.AVATAR, 1); f.frame_step(30)
-    boosted = speeds(1, BOOSTED)
-    f.SHIP[0xc] = 1.75; f.spawn_copy(f.AVATAR, 1)
-    f.apply('shipspeed', 1); f.frame_step(30)
-    check(boosted and abs(f.speed(1, 0xc) - 1.75) < 1e-4 and abs(f.speed(1, 0x10) - 4.08) < 1e-4
-          and 'speeds put back' not in text(logs / 'ImpatientDiver.log'),
-          'a record the game made again is never overwritten when switched off: walk %.2f' % f.speed(1, 0xc))
+# ... nothing without a click, nor as a client; a pick that brings no camera move ends after 1.5 s paced, and the next
+# click may try again
+r = Run(mode=INSTANT)
+r.T.sync = None
+r.ship()
+r.frame(60)
+r.T.players = 2
+r.friend()
+r.map_page()
+r.in_pod()
+r.do('T.other.anim[14] = 17')
+r.frame(30)
+check(r.speed() == 'x1', 'host, everyone in the pods, no click: nothing sped up')
+r.frame(click=True)
+check(r.speed() == 'jump', 'host: a click with everyone in: the zoom')
+r.frame(30)
+check(r.speed() == 'x1' and any('no loadout page after the click' in l for l in r.lines()),
+      'no camera move after the pick: x1')
+r.frame(click=True)
+check(r.speed() == 'jump', 'the next click tries again')
+r = Run(mode=INSTANT)
+r.T.sync = None
+r.ship()
+r.frame(60)
+r.T.players = 2
+r.T.host = False
+r.friend()
+r.map_page()
+r.in_pod()
+r.do('T.other.anim[14] = 17')
+r.frame(30)
+r.frame(click=True)
+r.frame(3)
+check(r.speed() == 'x1', 'a client\'s click with everyone in speeds nothing up (its zoom follows the host\'s)')
 
-    # 11b. No private record for the local Helldiver: nothing written anywhere; the speed code missing, or the movement
-    #      update reading another record: unavailable.
-    lua, logs = new_game(['shipspeed_on'], image)
-    f = fake(lua)
-    f.frame_step(1)
-    f.set_game_state(3); f.spawn_copy(f.OTHER, 0)
-    f.frame_step(60)
-    check(speeds(0, SHIP) and 'the local Helldiver has no ship movement record yet' in text(logs / 'ImpatientDiver.log'),
-          'speed boost: no record of its own, nothing written')
-    rva, code = sig_bytes(image, 'speed_cap')
-    lua, logs = new_game(['shipspeed_on'], image, "fake.patch(%d, string.rep('\\0', %d))" % (rva, len(code)))
-    f = fake(lua)
-    f.frame_step(40)
-    f.set_game_state(3); f.spawn_copy(f.AVATAR, 1); f.frame_step(60)
-    check(speeds(1, SHIP) and 'Ship walk speed boost: NOT AVAILABLE, the ship speed is normal (code "speed_cap" not found)'
-          in text(logs / 'ImpatientDiver_STATUS.log'), 'speed code missing: the speed is normal')
-    rel = (0x506580 - (0xa6ca4e + 5)).to_bytes(4, 'little', signed=True)
-    lua, logs = new_game(['shipspeed_on'], image, "fake.patch(%d, '%s')" % (0xa6ca4f, lua_bytes(rel)))
-    f = fake(lua)
-    f.frame_step(40)
-    check('Ship walk speed boost: NOT AVAILABLE, the ship speed is normal (the movement update reads another record)'
-          in text(logs / 'ImpatientDiver_STATUS.log'), 'the movement update must call the record resolver found')
+# back on the map from the loadout view, a new pick zooms again 1.2 s from the click to the camera's
+# move, then 0.9 s), as host with others and alone; not before the camera is back, nor without a click
+r = Run(mode=INSTANT)
+r.T.sync = None
+r.ship()
+r.frame(60)
+r.T.players = 2
+r.friend()
+r.map_page()
+r.in_pod()
+r.do('T.other.anim[14] = 17')
+r.frame(30)
+r.frame(click=True)
+r.do('T.ship.units[1].cam.y = 0.1')
+r.frame(3)
+r.do('T.ship.units[1].cam.y = 1.2')            # in the loadout view
+r.frame(5)
+check(r.speed() == 'x1', 'host: x1 in the loadout view')
+r.do('T.ship.units[1].cam.y = 0.4')            # going back to the map
+r.frame(3)
+r.frame(click=True)
+r.frame()
+check(r.speed() == 'x1', 'a click before the camera is back on the map speeds nothing up')
+r.do('T.ship.units[1].cam.y = 0.01')
+r.frame(5)
+check(r.speed() == 'x1' and any('back on the drop location map' in l for l in r.lines()),
+      'back on the map: nothing sped up without a click')
+r.frame(click=True)
+check(r.speed() == 'jump', 'host: a pick again zooms again')
+r.frame()
+check(r.speed() == 'jump', 'still while the camera rests on the map')
+r.do('T.ship.units[1].cam.y = 0.2')
+r.frame()
+r.frame()
+check(r.speed() == 'x1', 'x1 a jump after the camera began its move')
+r = Run()
+r.ship()
+r.map_page()
+r.in_pod()
+r.frame(60)
+r.frame(click=True)
+r.frame(4)
+r.do('T.map.units[#T.map.units + 1] = T.diver({ 1, 2, 3 })')   # the loadout page: its Helldiver
+r.frame(10)
+r.do('T.ship.units[1].cam.y = 1.2')
+r.frame(5)
+r.frame(click=True)
+check(r.rate() == 1, 'alone: a click in the loadout view speeds nothing up')
+r.do('T.ship.units[1].cam.y = 0')               # back on the map, the loadout page's Helldiver still there
+r.frame(5)
+check(r.rate() == 1, 'alone: back on the map, nothing sped up without a click')
+r.frame(click=True)
+check(r.rate() == 8, 'alone: a pick again zooms again')
+r.frame(9)                       # 1.2 s of game time, as the 1.2 s at x1 live
+check(r.rate() == 8, 'alone: still fast while the camera rests on the map')
+r.do('T.ship.units[1].cam.y = 0.2')
+r.frame(9)
+check(r.rate() == 1, 'alone: x1 once the camera\'s move is over')
+r.do('T.ship.units[1].cam.y = 1.2')
+r.frame(5)
+r.frame(click=True)
+check(r.rate() == 1, 'alone: a click in the loadout view after a pick again speeds nothing up')
+r.do('T.ship.units[1].cam.y = 0')
+r.frame(5)
+check(any(l.endswith('back on the drop location map') for l in r.lines()[-5:]), 'alone: back on the map again')
+r.posture(16)
+r.frame()
+r.in_pod()
+r.frame(5)
+r.frame(click=True)
+check(r.rate() == 1, 'alone, in the pod again with the loadout page\'s Helldiver: no pick again yet')
 
-    # 12. The Windows functions are declared under the mod's own names (another mod's declarations of the bare names,
-    #     made first in this harness with other types, would otherwise take over every call).
-    check(not re.search(r"\b(GetCurrentProcess|GetCurrentProcessId|GetModuleHandleA|ReadProcessMemory|WriteProcessMemory"
-                        r"|GetAsyncKeyState|GetForegroundWindow|GetWindowThreadProcessId)\(", MAIN),
-          "Windows functions under the mod's own names (imd_...)")
-
-    # 7. Not the game (no game.dll): nothing happens.
-    lua, logs = new_game(['ftl_auto'], image, 'fake.no_game = true')
-    f = fake(lua)
-    f.frame_step(3)
-    check(text(logs / 'ImpatientDiver_STATUS.log').startswith('NOT AVAILABLE - game.dll not loaded'),
-          'without game.dll the status says so and nothing runs')
-
-    passed = sum(results)
-    print(f'{passed}/{len(results)} passed')
-    return 0 if passed == len(results) else 1
-
-
-if __name__ == '__main__':
-    sys.exit(main())
+# switched off in the F9 menu mid-scene: the game's clock goes back
+r = Run()
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame()
+check(r.rate() == 8, 'a scene at x8')
+r.mod.on_stop()
+check(r.rate() == 1, 'stopped: x1 again')
+check(r.T.title == 'Impatient Diver (CSL/EAC)' and all(len(s.hint) <= 200 for s in r.T.specs.values()),
+      'each row has a hint Chef shows whole')
+if failures:
+    print('FAILED:', *failures, sep='\n  ')
+    sys.exit(1)
+print('tests: all checks passed')

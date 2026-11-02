@@ -1,1727 +1,932 @@
 -- HD2-Addon: mods/alomare/skip_intro_animation
--- Impatient Diver by Alomare.
---
--- Skips ship sequences. Each is set in Mod Options Menu (escape menu > MODS) to Off, Manual (spacebar, plus an
--- optional Mod Bindings Menu binding) or Automatic (the quick ones, intro, hellpod and zoom, only Off or Automatic);
--- without that mod each is Automatic:
---   Intro cinematics     the Super Earth announcement and the recruitment video before the title screen: the title
---                        screen's own no-intro start (as on a return to the title), so they are never loaded
---   Log-in ship intro    ship_intro, then ship_bridge_intro
---   Cryo pod transition  ship_teleporter_arrival (the game itself places the Helldiver at the pod exit)
---   FTL transition       ship_planet_departure, ship_planet_arrival and ship_teleporter_network_join
---                        (joining a lobby), with the FTL screen fades held clear
---   Hellpod to loadout   the local Helldiver's seat transition into its hellpod, then the Hellpod briefing's intro
---                        wait; the briefing, loadout and launch are untouched
---   Drop location zoom   the zoom on the map after a drop location is picked, before the loadout page opens
--- Every skip is a fast-forward: each scene's phases wait on timers, and the mod moves the running phase's
--- timer on so the game's own update changes phase, with everything that phase change normally does. The hellpod
--- entry is the same idea: the seat transition waits on a deadline per step, which the mod moves to now; the drop
--- location zoom is a progress value the game moves to 1 over a second, which the mod sets to 1.
--- Loading waits are never skipped. (Version 1 ended the log-in intro through the game's interrupt, whose
--- abort path left cinematic state behind that crashed the next hellpod launch.)
---
--- Ship Walk Speed Boost (On or Off, Off by default): aboard the ship, the local Helldiver's movement speeds are tripled, up to the
--- game's own 10 m/s limit. The ship's Helldiver reads them from a private copy of its movement record (made at spawn
--- from the ship's own settings), which the mod changes; mission Helldivers, other players' and the shared record are
--- never touched, and the speeds are put back when the Helldiver leaves the ship or the option is turned off.
---
--- Galactic Map Quick Exit: Escape (option ESC Closes Galactic Map, On by default), or the Mod Bindings Menu key
--- "Close galactic map" (always), on the galactic map sets the map presenter's own close request, so the game's
--- presenter manager closes it (and pops its screen) that frame, from any zoom level. With the option Off, Escape backs
--- out one level, as in the game. While the chat's text input is open, the keys are ignored (a letter may be bound to
--- the map key).
---
--- Everything native is found in game.dll by code signatures (first at this build's addresses, else by a search
--- of its executable sections spread over frames, where a signature must match exactly once), timer waits and
--- structure offsets are read from the matched code, and scene ids come from the game's own id-to-name table.
--- Anything not found, or found more than once, disables only what depends on it, and that sequence plays normally.
--- Memory is read and written with ReadProcessMemory / WriteProcessMemory on the game's own process, which fail
--- instead of crashing.
--- Status: %LOCALAPPDATA%\CowboyBingus\Helldivers2\Logs\ImpatientDiver_STATUS.log (first line = verdict).
-if rawget(_G, 'ImpatientDiver') then return end
+-- HD2-Requires: chef-shared-loader >= 1.5.1
+-- Impatient Diver, for Chef Shared Loader (Lua 5.1, no FFI). How it works in the game: RESEARCH.md.
+-- It speeds scenes up by itself, each as its row in the F9 menu says (Off, Fast or Instant; Instant by default):
+--   the log-in intro: from its outside shot until the ship's camera, narrowed for the walk to the bridge, is wide again;
+--   the cryo pod (joining a lobby): while our Helldiver is in the pod's loop or its walk-out clip;
+--   the FTL: while the Super Destroyer's big outside world (the FTL's) holds its cannons;
+--   a lobby change (joining or leaving, on the FTL's row): the destroyer's small outside shot as it begins over our
+--   loaded ship or as the old ship empties, and from a ship's load under it, until its cannons go;
+--   the hellpod entry: while our Helldiver plays its stepping-in clip, then while the camera holds its close-up on
+--   the pod (a client's, before it pulls out to the drop location map);
+--   the drop zoom: alone, from a click on the drop location map, from inside the hellpod, until the loadout page opens
+--   and its camera move is over; as host with others, from the moment every player's Helldiver is in its hellpod
+--   after a click, until the camera's move into the loadout view is over (a client's zoom follows the host's); back
+--   on the map from the loadout view, the next click zooms again (alone too), until the camera's move is over.
+-- Fast: time x8. Instant: at x1 the clock jumps 1 s every frame, up to a bit more than the scene's length, then x8 for
+-- what is left (the log-in intro's outside shot and its walk to the bridge each have their own jumps and cap, as do
+-- the cryo pod's wait and its walk-out; the walk-out starts with 30 frames at x8, for the game to place the Helldiver).
+-- Back to x1 the frame the scene ends, or after 45 s of game time. Never in a mission or in the hellpod launch, and no
+-- outside shot in the return from a mission (until its own is over, 90 s at most). With other players too: only our
+-- own Helldiver's posture counts (found as the Helldiver section says; until then only a posture every player's
+-- Helldiver shares). Only Fast shows a notice.
+-- Log: ImpatientDiver.log in the loader's folder (%APPDATA%\Arrowhead\Helldivers2): the scenes with their game time
+-- and jumps, the speed changes, the session and what marks the scenes. Each line starts with the real seconds since
+-- the mod started.
+local chef = ...
+local M = { version = '9' }
+local TITLE = 'Impatient Diver (CSL/EAC)'   -- the name mod loaders show (the F9 menu's group; Arsenal's in the build)
 
-local ffi = require('ffi')
--- The whole mod runs in LuaJIT's interpreter: its per-frame code is light, and traces that never compile (pcall into
--- engine functions, FFI reads) kept LuaJIT retrying them every frame (Bingus Shared Loader v20's churn log named it).
-if rawget(_G, 'jit') then jit.off(true, true) end
+local sr = stingray
+local Application, World, Unit, Camera, Vector3, IdString64 =
+  sr.Application, sr.World, sr.Unit, sr.Camera, sr.Vector3, sr.IdString64
+local clock, fmt, min = os.clock, string.format, math.min
 
-local M = {version = '8', frames = 0, time = 0, errors = 0}
-rawset(_G, 'ImpatientDiver', M)
+local FAST = 8
+local JUMP = 1               -- Instant: game seconds the clock jumps each frame (one 5 s jump was fine in every scene)
+local STEP_MOST = 0.2        -- the engine's longest step (system_step_range): only a jump makes a longer one
+-- Instant: game seconds jumped at most a scene, so a wait for loading can't use up more; x8 for the rest. Jumped, the
+-- FTL took 14 s, the hellpod entry 8 and the drop zoom 4 or 5 (each phase ends up to a jump late). The
+-- log-in intro's outside shot has 3.33 s of timed phases, then waits for the ship to load (1.35 s real at x8 and
+-- jumped alike); its walk to the bridge gets jumps of its own once the ship is there. The cryo pod: the pod rolling in
+-- and a 1 s wait alone (7 or 8 jumps), but after joining a lobby a wait for loading (2.3 to 3.5 s real
+-- whether 16 or 40 s were jumped), then the 7.5 s walk-out with its own jumps. A lobby
+-- change: 0.5 to 2.4 s real from the old ship's going to the next one's load (joining takes longest), then 3 to 6 jumps
+-- (lobby join phase 3 waits 5 s); that part has jumps of its own. The hellpod entry: 8 jumps for the clip, then a
+-- client's camera held its close-up on the pod 2.4 s at x1 (a host's is on the map as the clip ends).
+local JUMP_MOST = { ['log-in intro'] = 6, walk = 16, ['cryo pod'] = 12, ['walk-out'] = 12, FTL = 20,
+                    ['lobby change'] = 12, ['hellpod entry'] = 12, ['pod view'] = 6, ['drop zoom'] = 7 }
+local PLACE_FRAMES = 30      -- the cryo pod's walk-out at x8 first: the game places the Helldiver a few frames in
+local CAP = 45               -- game seconds a scene (each part of the log-in intro) may be sped up
+local AFTER_MISSION = 90     -- real seconds at most after a mission with no outside shot sped up (the return plays as
+                             -- it is): until the ship has loaded with no outside shot left
+local WIDE_FOV = 1.0         -- the main camera wider than this (1.134 in play): the player has it
+local MAP_FOV = 1.2          -- ... and in the hellpod, as wide as this: the drop location map's view (1.222, 70 degrees)
+local POD_VIEW = 10          -- game seconds at most of the camera's close-up on the pod after the stepping-in clip
+local EMPTIED_EARLY = 0.25   -- real seconds the old ship may empty before the destroyer's cannons show (the same frame)
+-- The waits below are paced: game seconds as x8 would have made them, the jumps left out (what loads takes real time)
+local WALK_WAIT = 3          -- after the ship loads in the log-in intro, for its camera to narrow
+local ZOOM_RAMP = 1.5        -- from a click on the drop location map to the loadout page, at most
+local ZOOM_MOVE = 1          -- game seconds (jumps in) of the camera's move into the loadout view (a 1 s blend)
+local SMALL = 1200           -- a world up to this size has its kinds counted whenever its unit count changes
+local SHIP = 1000            -- a main world bigger than this, off missions: the ship
+-- the destroyer's outside world in an FTL has 584 to 593 units (every FTL so far, host and client); the outside shots
+-- of joining or leaving a lobby 11 to 24, the hellpod launch's 25 to 33, the log-in intro's 62 or 63
+local FTL_UNITS = 300
+local SCAN_MOST = 8000       -- a world bigger than this (a mission) isn't scanned
+local SCAN_SECONDS = 2       -- the big worlds' kinds and the main world's cameras
+local SCAN_AGAIN = 1         -- real seconds at least between two scans asked by a new main world
+local SCAN_SLOW = 8          -- a scan's milliseconds logged over this
+local RATE_SECONDS = 1       -- game time against real time, while sped up
+local SESSION_SECONDS = 0.5  -- the session (host or not, players) read again
+local DIVER_SECONDS = 0.5    -- the Helldiver looked up again
+local JOIN_SECONDS = 60      -- after joining another's session: the only Helldiver in the cryo pod is ours
+local FOLLOW_SECONDS = 0.25  -- the camera and the Helldivers sampled, to find ours among several
+local FOLLOW_MOVE = 0.5      -- a sample counts when the camera moved this much since the last
+local FOLLOW_KEEP = 0.3      -- ... and ours kept its offset to the camera within this share of the move
+local FOLLOW_NEAR = 8        -- ours is at most this far from the camera
+local FOLLOW_SAMPLES = 4     -- moving samples in a row in which ours alone kept its offset
+local CAM_MOVE = 0.02        -- metres the main camera moves as the zoom's end begins
+local VIEW_AWAY = 0.5        -- metres the main camera is from the drop location map's spot: in the loadout view (1.2 m)
+local MAP_BACK = 0.1         -- ... and within this of it again: back on the map (0.01 m off)
+local CAMERA_KIND = '465f4895f3dc98d1'    -- core/units/camera
+local HELLDIVER = '4d1c334d294dfa97'      -- content/fac_helldivers/cha_avatar/avatar_helldiver
+-- the posture layer's states in this build's avatar_helldiver (0-based, as Unit.animation_get_state reports them):
+-- the clip stepping into the hellpod (entered by event 0xa9b0a3bb from any state) and the loop inside it, which the
+-- clip's end event leads to; the cryo pod's loop (event 0x2a49b45b) and its walk-out clip (event 0x23173e19, as in
+-- build 25480438; its end event leads to 3, normal play)
+local POSTURE, POD_ENTER, POD_IN, CRYO_IN, CRYO_OUT = 14, 15, 17, 0, 6
+local MAP_KIND = '96af7d6acb949f34'       -- content/art_shared/meshes/plane_2x2m: the loadout screen's world
+-- content/env_ship/hangar/se_destroyer_supportcannon_ missile_launcher, orbital_cannon_single, orbital_gatling_single,
+-- planet_killer (the ship's world has them too: they only count in a small world)
+local CANNONS = { '03544419135a9935', '26ef7da30b82246d', '35035d21c9b68391', 'c8ccd4986bf70c7c' }
+local LAUNCH_KIND = 'e93e9835bce95d4a'    -- only in the destroyer's world of the hellpod launch
 
-local S = rawget(_G, 'stingray')
-local loader = rawget(_G, 'CowboyBingusModLoader')
+if chef.has and chef.has('own_log') then chef.own_log('ImpatientDiver') end
+local T0 = clock()
+local function log(f, ...) chef.log('%7.2f %s', clock() - T0, fmt(f, ...)) end
+local function say(text) if chef.notify then chef.notify(text, 2, 255, 220, 90) end end
 
----------------------------------------------------------------------------------------
--- The game's code (RESEARCH.md beside this script)
+-- an engine call's first use is logged first, so a crash in it names it
+local first_use = {}
+local function first(name)
+  if not first_use[name] then
+    first_use[name] = true
+    log('first call: %s', name)
+  end
+end
 
--- BEGIN SIGNATURES (generated by research/signatures.py; game.dll build 25480438 addresses)
-local SIGS = {
-    {name = 'interrupt_site', rva = 0xad6ca2, optional = true, text = '48 8B 0D ?? ?? ?? ?? 39 91 ?? ?? ?? ?? 0F 84 ?? ?? ?? ?? 48 83 C4 30 5B E9 ?? ?? ?? ??',
-     fields = {manager = {'rip', {3}, {7}}, current = {'u32', {9}}}},
-    {name = 't13p2', rva = 0x1178030, optional = true, text = '48 8B 05 ?? ?? ?? ?? 49 8B 88 ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 48 39 48 ?? 0F 82 ?? ?? ?? ?? F3 0F 10 05 ?? ?? ?? ??',
-     fields = {clock = {'rip', {3}, {7}}, t13p2_stamp = {'u32', {10}}, t13p2_wait = {'u32', {17}}, clock_now = {'u8', {24}}}},
-    {name = 't13p3', rva = 0x1177f9b, optional = true, text = '48 8B 8A ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 48 39 48 18 0F 82 ?? ?? ?? ?? C7 42 04 FF FF FF FF 33 FF',
-     fields = {t13p3_stamp = {'u32', {3}}, t13p3_wait = {'u32', {10}}}},
-    {name = 't13p4', rva = 0x1177ec4, optional = true, text = '49 8B 88 ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 48 39 48 18 0F 82 ?? ?? ?? ?? 48 8B 1D ?? ?? ?? ??',
-     fields = {t13p4_stamp = {'u32', {3}}, t13p4_wait = {'u32', {10}}}},
-    {name = 't12p3', rva = 0x117df3d, optional = true, text = '48 8B 8A ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 48 39 48 18 0F 82 ?? ?? ?? ?? BA 0B 00 00 00',
-     fields = {t12p3_stamp = {'u32', {3}}, t12p3_wait = {'u32', {10}}}},
-    {name = 't11p2', rva = 0x117dee2, optional = true, text = '48 8B 81 ?? ?? ?? ?? 48 05 ?? ?? ?? ?? 48 39 42 18 0F 82 ?? ?? ?? ?? BA 03 00 00 00',
-     fields = {t11p2_stamp = {'u32', {3}}, t11p2_wait = {'u32', {9}}}},
-    {name = 't15p3', rva = 0x1179efb, optional = true, text = '48 8B 81 ?? ?? ?? ?? 48 05 ?? ?? ?? ?? 49 39 40 18 0F 82 ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 0F 84 ?? ?? ?? ?? E8 ?? ?? ?? ??',
-     fields = {t15p3_stamp = {'u32', {3}}, t15p3_wait = {'u32', {9}}}},
-    {name = 't7p1', rva = 0x117dbb1, optional = true, text = '48 8B 81 ?? ?? ?? ?? 48 05 ?? ?? ?? ?? 48 39 42 18 0F 82 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 80 78 01 00 0F 84 ?? ?? ?? ?? BA 03 00 00 00',
-     fields = {t7p1_stamp = {'u32', {3}}, t7p1_wait = {'u32', {9}}}},
-    {name = 't7p2', rva = 0x117db78, optional = true, text = '48 8B 81 ?? ?? ?? ?? 48 05 ?? ?? ?? ?? 48 39 42 18 72 ?? 48 8B 81 D0 00 00 00 A8 02 75 ?? 48 83 C8 02 48 89 81 D0 00 00 00 E8 ?? ?? ?? ?? 48 8B 4B 08 48 8B 15 ?? ?? ?? ?? 48 8B 81 ?? ?? ?? ?? 48 05 C0 C6 2D 00',
-     fields = {t7p2_stamp = {'u32', {3, 60}}, t7p2_wait = {'u32', {9}}}},
-    {name = 't3_2s', rva = 0x116d7d8, optional = true, text = '48 8B 8A ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 48 39 48 18 0F 82 ?? ?? ?? ?? BA 03 00 00 00 48 8B CB 48 83 C4 20 5B E9 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8B 8A ?? ?? ?? ?? 48 81 C1 D0 12 13 00',
-     fields = {t3_2s_stamp = {'u32', {3, 52}}, t3_2s_wait = {'u32', {10}}}},
-    {name = 't3_125', rva = 0x116d809, optional = true, text = '48 8B 8A ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 48 39 48 18 0F 82 ?? ?? ?? ?? 43 8B 8C 81 A8 DA 16 01',
-     fields = {t3_125_stamp = {'u32', {3}}, t3_125_wait = {'u32', {10}}}},
-    {name = 't3_175', rva = 0x116d8bb, optional = true, text = '48 8B 8A ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 48 39 48 18 0F 82 ?? ?? ?? ?? 43 8B 8C 81 D8 DA 16 01',
-     fields = {t3_175_stamp = {'u32', {3}}, t3_175_wait = {'u32', {10}}}},
-    {name = 't3_25', rva = 0x116d92f, optional = true, text = '48 8B 8A ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? E9 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8B 8A ?? ?? ?? ?? 48 81 C1 40 42 0F 00 48 39 48 18 0F 82 ?? ?? ?? ?? BA 07 00 00 00',
-     fields = {t3_25_stamp = {'u32', {3, 29}}, t3_25_wait = {'u32', {10}}}},
-    {name = 't3_1s', rva = 0x116d949, optional = true, text = '48 8B 8A ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 48 39 48 18 0F 82 ?? ?? ?? ?? BA 07 00 00 00',
-     fields = {t3_1s_stamp = {'u32', {3}}, t3_1s_wait = {'u32', {10}}}},
-    {name = 't3_15', rva = 0x116d97a, optional = true, text = '48 8B 8A ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 48 39 48 18 0F 82 ?? ?? ?? ?? BA 08 00 00 00',
-     fields = {t3_15_stamp = {'u32', {3}}, t3_15_wait = {'u32', {10}}}},
-    {name = 'game_state', rva = 0x11d5b23, optional = true, text = '48 8B 05 ?? ?? ?? ?? 83 B8 ?? ?? ?? ?? 04 74 ?? 32 C0',
-     fields = {game = {'rip', {3}, {7}}, game_state = {'u32', {9}}}},
-    {name = 'local_ref', rva = 0x4db76b, optional = true, text = '48 8B 05 ?? ?? ?? ?? 4C 8B F9 83 B8 ?? ?? ?? ?? 00 74 ?? 8B 90 ?? ?? ?? ?? 48 8D 4C 24 68 E8 ?? ?? ?? ??',
-     fields = {players = {'rip', {3}, {7}}, local_active = {'u32', {12}}, avatar_ref = {'u32', {21}}, resolver = {'call', {31}, {35}}}},
-    {name = 'ref_resolver', rva = 0xfd9ba4, optional = true, text = '4C 8B 1D ?? ?? ?? ?? 44 8B C2 4C 8B C9 81 FA FF 7F 00 00 75 ?? 8B 05 ?? ?? ?? ?? 89 01 48 8B C1 48 83 C4 08 C3 45 8B 93 ?? ?? ?? ?? 33 D2 48 89 5C 24 10 41 8B 9B ?? ?? ?? ?? 48 89 6C 24 18 41 0F AF D8 41 8D 6A FF 48 89 74 24 20 48 89 3C 24 45 85 D2 74 ?? 49 8B BB ?? ?? ?? ?? 41 8B B3 ?? ?? ?? ?? 66 0F 1F 84 00 00 00 00 00 8B C5 8D 0C 1A 48 23 C8 48 8D 04 CF 8B 0C CF 3B CE 74 ?? 41 3B C8 74 ?? FF C2 41 3B D2 72 ?? 33 C0 48 8B 3C 24 48 8B 74 24 20 48 8B 6C 24 18 48 8B 5C 24 10 44 39 00 75 ?? 8B 40 04 48 8D 04 40 48 8D 80 ?? ?? ?? ?? 49 8D 04 C3',
-     fields = {entities = {'rip', {3}, {7}}, ent_capacity = {'u32', {40}}, ent_multiplier = {'u32', {54}}, ent_map = {'u32', {88}}, ent_empty = {'u32', {95}}, ent_ids = {'u32', {175}}}},
-    {name = 'seaters', rva = 0x639846, optional = true, text = '8B 42 08 4D 8B F0 3B 05 ?? ?? ?? ?? 4C 8B 2D ?? ?? ?? ?? 74 ?? 45 8B 4D ?? 45 33 C0 45 8B 5D ?? 44 0F AF D8 41 8D 71 FF 45 85 C9 74 ?? 49 8B 5D ?? 41 8B 7D ?? 0F 1F 44 00 00 8B CE 43 8D 14 18 48 23 D1 8B 0C D3 4C 8D 14 D3 3B CF 0F 84 ?? ?? ?? ?? 3B C8 0F 84 ?? ?? ?? ?? 41 FF C0 45 3B C1 72 ?? BF FF FF FF FF 49 8B 45 ?? 44 8B E7 49 C1 E4 06',
-     fields = {seaters = {'rip', {15}, {19}}, seat_capacity = {'u8', {24}}, seat_multiplier = {'u8', {31}}, seat_map = {'u8', {48}}, seat_empty = {'u8', {52}}, seat_records = {'u8', {106}}}},
-    {name = 'seat_wait', rva = 0x639d57, optional = true, text = '44 38 6C 37 ?? 0F 84 ?? ?? ?? ?? F3 0F 10 35 ?? ?? ?? ?? 66 0F 1F 44 00 00 83 7C 37 ?? FF 0F 84 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8B 4C 37 ?? 48 39 48 ?? 0F 82 ?? ?? ?? ??',
-     fields = {seat_moving = {'u8', {4}}, seat_target = {'u8', {28, 51}}, seat_clock = {'rip', {39}, {43}}, seat_deadline = {'u8', {47}}, seat_clock_now = {'u8', {28, 51}}}},
-    {name = 'hellpods', rva = 0xadbaaf, optional = true, text = '48 8B 35 ?? ?? ?? ?? 33 FF 39 7E 08 76 ?? 0F 1F 00 48 8B 4C FE ?? 41 B8 03 00 00 00 8B 59 08',
-     fields = {hellpods = {'rip', {3}, {7}}, pod_list = {'u8', {21}}}},
-    {name = 'screen', rva = 0x1082ef0, optional = true, text = '48 8B 05 ?? ?? ?? ?? 48 8B 88 ?? ?? ?? ?? 83 B9 ?? ?? ?? ?? FF 0F 95 C0 C3',
-     fields = {screen_stack = {'rip', {3}, {7}}, screen_slot = {'u32', {10}}, local_index = {'u32', {16}}}},
-    {name = 'briefing_intro', rva = 0x146909f, optional = true, text = '83 BE ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? F3 0F 10 86 ?? ?? ?? ?? F3 41 0F 5C C0 0F 2F F8 F3 0F 11 86 ?? ?? ?? ?? 0F 82 ?? ?? ?? ??',
-     fields = {intro_phase = {'u32', {2}}, intro_timer = {'u32', {17, 33}}}},
-    {name = 'loadout_page', rva = 0x1470db3, optional = true, text = '44 8B 61 ?? 45 0F B6 F8 8B DA 48 8B F1 44 3B E2 0F 84 ?? ?? ?? ?? 49 89 7B 18 41 B1 01 4D 89 6B D0 45 33 C0 4D 89 73 C8 41 0F 29 7B A8 89 51 ??',
-     fields = {page = {'u8', {3, 47}}}},
-    {name = 'zoom_ramp', rva = 0x14684ef, optional = true, text = '48 8B 05 ?? ?? ?? ?? F3 44 0F 10 0D ?? ?? ?? ?? 44 39 B0 ?? ?? ?? ?? 76 ?? F3 0F 10 8E ?? ?? ?? ?? F3 0F 10 80 ?? ?? ?? ?? 0F 2E C8 7A ?? 74 ?? 41 0F 28 D8 41 0F 28 D1 E8 ?? ?? ?? ?? F3 0F 11 80 ?? ?? ?? ?? F3 0F 10 8E ?? ?? ?? ?? 41 0F 2E C9 7A ?? 75 ?? EB ?? 44 38 B6 ?? ?? ?? ?? 75 ?? F3 0F 10 86 ?? ?? ?? ?? 41 0F 2E C1 7A ?? 75 ?? 48 8B 05 ?? ?? ?? ?? F3 0F 10 80 ?? ?? ?? ?? 41 0F 2E C1 7A ?? 75 ?? 44 39 76 ?? 75 ?? 48 8B CE E8 ?? ?? ?? ??',
-     fields = {zoom_group = {'rip', {3, 115}, {7, 119}}, zoom_players = {'u32', {19}}, zoom_target = {'u32', {29, 73, 100}}, zoom_progress = {'u32', {37, 65}}, move_toward = {'call', {57}, {61}}, page = {'u8', {138}}, zoom_synced = {'u32', {123}}, zoom_leader = {'u32', {90}}, to_loadout = {'call', {145}, {149}}}},
-    {name = 'fader', rva = 0x11d66c0, optional = true, text = '48 83 EC 38 48 8B 0D ?? ?? ?? ?? 33 D2 48 81 C1 ?? ?? ?? ?? 48 89 54 24 20 F2 0F 10 44 24 20 0F 28 D1 0F 57 C9 0F 2E D1 8B 81 ?? ?? ?? ?? 89 81 ?? ?? ?? ?? C7 81 ?? ?? ?? ?? 00 00 80 3F C7 81 98 07 00 00 00 00 00 80 F2 0F 11 81 88 07 00 00 89 91 90 07 00 00 F3 0F 11 91 ?? ?? ?? ??',
-     fields = {fader = {'rip', {7}, {11}}, fader_offset = {'u32', {16}}, fader_alpha = {'u32', {42}}, fader_start = {'u32', {48}}, fader_target = {'u32', {54}}, fader_duration = {'u32', {90}}}},
-    {name = 'names', rva = 0x117e950, optional = true, text = 'FF C9 83 F9 ?? 0F 87 ?? ?? ?? ?? 48 8D 15 ?? ?? ?? ?? 8B 8C 8A ?? ?? ?? ?? 48 03 CA FF E1',
-     fields = {}},
-    {name = 'presenters', rva = 0x662520, optional = true, text = '48 8B 0D ?? ?? ?? ?? 48 81 C1 ?? ?? ?? ?? 8B 41 ?? 83 E8 01 48 98 78 ?? 48 8D 0C 81 48 83 C1 ?? 83 39 0E 74 ?? 48 83 E9 04 48 83 E8 01 79 ?? C3 48 8B 0D ?? ?? ?? ??',
-     fields = {ui = {'rip', {3}, {7}}, presenters = {'u32', {10}}, depth = {'u8', {16}}, stack = {'u8', {31}}}},
-    {name = 'presenter_open', rva = 0x14c038e, optional = true, text = '83 79 ?? 00 74 ?? E8 ?? ?? ?? ?? 4C 8B C6',
-     fields = {current_presenter = {'u8', {2}}, close = {'call', {7}, {11}}}},
-    {name = 'presenter_update', rva = 0x14bf890, optional = true, text = '8B 16 48 8D 8B ?? ?? ?? ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 48 8B CB E8 ?? ?? ?? ??',
-     fields = {collection = {'u32', {5}}, check = {'call', {10}, {14}}, close = {'call', {22}, {26}}}},
-    {name = 'hologram_request', rva = 0x14bdcbb, optional = true, text = '48 8B 81 90 00 00 00 0F B6 40 ?? C3 48 8B 81 ?? ?? ?? ?? 0F B6 40 ?? C3 48 8B 81 A0 00 00 00 0F B6 00 C3',
-     fields = {holo_slot = {'u32', {15}}, close_flag = {'u8', {10, 22}}}},
-    {name = 'chat_notice', rva = 0x12f2f81, optional = true, text = '48 8B 3D ?? ?? ?? ?? 49 8B F0 48 8B DA 80 BF ?? ?? ?? ?? 00 0F 84 ?? ?? ?? ?? 4C 8B 1D ?? ?? ?? ?? 33 C0 49 39 1B 74 ?? FF C0 49 81 C3 C0 00 00 00 83 F8 08 72 ?? E9 ?? ?? ?? ?? 0F 1F 40 00 0F 29 74 24 70 48 8D 54 24 50 0F 28 35 ?? ?? ?? ?? 4C 8B C3 E8 ?? ?? ?? ?? 4D 8D 4B 08 48 89 74 24 28 48 8D 8F 80 70 4F 00 66 0F 7F 74 24 40 4C 8D 44 24 40 BA 7F 03 12 1C 0F 10 00 48 8D 44 24 30 48 89 44 24 20 0F 29 44 24 30 E8 ?? ?? ?? ?? F3 0F 10 15 ?? ?? ?? ?? 48 8D 8F ?? ?? ?? ?? 48 8B D0 E8 ?? ?? ?? ??',
-     fields = {hud = {'rip', {3}, {7}}, hud_active = {'u32', {15}}, chat_hud = {'u32', {154}}}},
-    {name = 'chat_input', rva = 0x18608d0, optional = true, text = '48 83 EC 28 80 B9 ?? ?? ?? ?? 00 4C 8B C9 74 ?? 84 D2 74 ?? E8 ?? ?? ?? ?? 84 C0 74 ?? 33 D2 49 8B C9',
-     fields = {chat_open = {'u32', {6}}}},
-    {name = 'avatar_copy', rva = 0x508db0, optional = true, text = '48 83 EC 28 4C 8B D1 48 85 C9 75 ?? 33 C0 48 83 C4 28 C3 8B 41 08 3B 05 ?? ?? ?? ?? 0F 84 ?? ?? ?? ?? 4C 8B 1D ?? ?? ?? ?? 45 33 C0 48 89 5C 24 30 48 89 6C 24 38 48 89 74 24 40 45 8B 8B ?? ?? ?? ?? 41 8B 9B ?? ?? ?? ?? 0F AF D8 48 89 7C 24 20 41 8D 69 FF 45 85 C9 74 ?? 49 8B BB ?? ?? ?? ?? 41 8B B3 ?? ?? ?? ?? 0F 1F 84 00 00 00 00 00 8B CD 41 8D 14 18 48 23 D1 48 8D 0C D7 8B 14 D7 3B D6 74 ?? 3B D0 74 ?? 41 FF C0 45 3B C1 72 ?? 33 C9 48 8B 7C 24 20 48 8B 74 24 40 48 8B 6C 24 38 48 8B 5C 24 30 39 01 75 ?? 8B 41 04 83 F8 FF 74 ?? 48 69 C8 54 03 00 00 49 8D 83 ?? ?? ?? ?? 48 03 C1 48 83 C4 28 C3 49 8B 0A 48 83 C4 28 E9 ?? ?? ?? ??',
-     fields = {avatars = {'rip', {37}, {41}}, copy_map = {'u32', {93}}, copy_capacity = {'u32', {62}}, copy_empty = {'u32', {100}}, copy_multiplier = {'u32', {69}}, copies = {'u32', {188}}}},
-    {name = 'speed_record', rva = 0xa6ca4e, optional = true, text = 'E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 0F 57 F6 F3 44 0F 10 25 ?? ?? ?? ?? 48 8B E8',
-     fields = {speed_resolver = {'call', {1}, {5}}}},
-    {name = 'speeds_crouch', rva = 0xa6cc91, optional = true, text = 'F3 0F 10 7D ?? E9 ?? ?? ?? ?? 48 8D 8E 68 E1 53 00 49 03 CE E8 ?? ?? ?? ?? 84 C0 74 ?? F3 0F 10 7D ?? E9 ?? ?? ?? ?? 48 8D 8E B4 DC 53 00 49 03 CE E8 ?? ?? ?? ?? 84 C0 74 ?? F3 0F 59 7D ?? E9 ?? ?? ?? ?? F3 0F 59 7D ?? E9 ?? ?? ?? ??',
-     fields = {speed_crouch_sprint = {'u8', {4}}, speed_crouch_jog = {'u8', {33}}, speed_crouch_aim = {'u8', {62}}, speed_crouch_walk = {'u8', {72}}}},
-    {name = 'speeds_stand', rva = 0xa6cd29, optional = true, text = 'F3 0F 59 7D ?? E9 ?? ?? ?? ?? 4D 8D 24 36 49 8D 8C 24 60 E1 53 00 E8 ?? ?? ?? ?? 84 C0 74 ?? 48 8B 44 24 38 0F 2F B4 30 54 78 54 00 72 ?? 48 8B 0D ?? ?? ?? ?? 44 8B CF 41 B8 3B 00 00 00 8B D3 E8 ?? ?? ?? ?? 84 C0 75 ?? F3 0F 10 7D ?? EB ?? F3 0F 10 7D ?? EB ?? 48 8D 8E 68 E1 53 00 49 03 CE E8 ?? ?? ?? ?? 84 C0 74 ?? F3 0F 10 7D ?? EB ??',
-     fields = {speed_prone = {'u8', {4}}, speed_sprint_exhausted = {'u8', {77}}, speed_sprint = {'u8', {84}}, speed_jog = {'u8', {110}}}},
-    {name = 'speeds_walk', rva = 0xa6cdde, optional = true, text = '4D 23 F9 0F B6 C2 0F 44 C8 84 C9 74 ?? F3 0F 59 7D ?? EB ?? F3 0F 59 7D ??',
-     fields = {speed_aim = {'u8', {17}}, speed_walk = {'u8', {24}}}},
-    {name = 'speed_cap', rva = 0xa6d0bf, optional = true, text = 'F3 41 0F 10 45 08 0F 2F C6 48 8B BC 24 18 01 00 00 72 ?? F3 0F 5D C7 0F 28 F8 0F 2F F7 77 ?? F3 0F 10 35 ?? ?? ?? ?? F3 0F 5D F7 0F 28 BC 24 E0 00 00 00 4C 8D 44 24 60 0F 57 C0 F3 41 0F 11 75 04',
-     fields = {speed_cap = {'rip', {35}, {39}}}},
-    {name = 'title_enter', rva = 0xad59f7, optional = true, text = '41 80 BE ?? ?? ?? ?? 00 75 ?? 40 84 F6 75 ?? 32 C0 EB ?? B0 01 48 8B 15 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 88 47 ??',
-     fields = {intro_flag = {'u32', {3}}, title_no_intro = {'u8', {37}}}},
-    {name = 'title_register', rva = 0xad5c71, optional = true, text = '48 8B 0D ?? ?? ?? ?? 48 89 7C 24 30 C7 44 24 38 ?? ?? ?? ?? 0F 10 44 24 30 8B 81 ?? ?? ?? ?? 48 03 C0 0F 11 84 C1 ?? ?? ?? ?? FF 81 ?? ?? ?? ??',
-     fields = {states = {'rip', {3}, {7}}, title_type = {'u32', {16}}, title_count = {'u32', {27, 44}}, title_entries = {'u32', {38}}}},
-    {name = 'title_update', rva = 0xad7ce8, optional = true, text = '80 B9 ?? ?? ?? ?? 00 49 89 5B 08 0F 85 ?? ?? ?? ?? 4C 8B 05 ?? ?? ?? ?? 49 8D 53 18 48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 18 48 8B 05 ?? ?? ?? ?? 48 8B 48 10 48 8B 81 28 03 00 00 48 B9 7A 81 AD B7 09 C1 2A 4F FF D0 85 C0 0F 84 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 B9 F9 D9 A5 D5 73 0E BF 6C 48 8B 50 10 48 8B 82 28 03 00 00 FF D0 85 C0 0F 84 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? 48 8B CB 48 8B 50 10 48 8B 82 28 03 00 00 FF D0 85 C0 0F 84 ?? ?? ?? ?? 48 8B CE E8 ?? ?? ?? ?? C6 86 ?? ?? ?? ?? 01',
-     fields = {title_set_up = {'u32', {2, 160}}, title_setup = {'call', {154}, {158}}}},
-    {name = 'title_setup', rva = 0xad645f, optional = true, text = '41 80 7E ?? 00 0F 85 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? B2 03 C7 45 C7 00 00 00 3F C7 45 CB 00 00 00 3F C7 45 DF 00 00 00 3F 0F B6 88 79 74 08 00 48 8B 45 C7 88 4C 24 38 49 8D 8E ?? ?? ?? ?? C7 44 24 30 37 00 00 00 48 89 44 24 28 C7 45 E3 00 00 00 3F 48 8B 45 DF 48 C7 45 B7 00 00 00 00 4C 8B 4D B7 48 89 44 24 20 E8 ?? ?? ?? ?? 48 8B 1D ?? ?? ?? ?? 49 8D 96 ?? ?? ?? ?? 48 8D 8B 60 01 00 00 E8 ?? ?? ?? ?? 48 8D 8B 60 01 00 00 E8 ?? ?? ?? ?? 41 C6 86 ?? ?? ?? ?? 01',
-     fields = {title_no_intro = {'u8', {3}}, title_player = {'u32', {59, 119}}, title_has_player = {'u32', {150}}}},
-    {name = 'title_queue', rva = 0xad7f9b, optional = true, text = '80 BE ?? ?? ?? ?? 00 48 89 BC 24 B8 00 00 00 0F 84 ?? ?? ?? ?? 80 BE ?? ?? ?? ?? 00 75 ?? 80 7E ?? 00 75 ?? 4C 8B 15 ?? ?? ?? ?? BA C2 74 1A 2B 49 8B CF C6 44 24 20 00 41 80 BA 78 74 08 00 00 41 0F 95 C1 E8 ?? ?? ?? ??',
-     fields = {title_has_player = {'u32', {2}}, title_queued = {'u32', {23}}, title_no_intro = {'u8', {32}}}},
+-- ------------------------------------------------------------------ the F9 menu: a row per scene
+local OFF, FAST_MODE, INSTANT = 1, 2, 3
+local MODE_NAMES = { 'Off', 'Fast', 'Instant' }
+local DEFAULT_MODE = INSTANT
+local ROWS = {
+  { scene = 'log-in intro', id = 'login_intro', label = 'Log-in ship intro',
+    hint = 'The camera flying into the ship and the walk to the bridge after you log in.' },
+  { scene = 'cryo pod', id = 'cryo_pod', label = 'Cryo pod transition',
+    hint = 'Your cryo pod rolling in and your Helldiver stepping out when you arrive on a ship.' },
+  { scene = 'FTL', id = 'ftl', label = 'FTL transition',
+    hint = 'The FTL jump, and the ship shots when you join or leave a lobby. Loading still takes its time.' },
+  { scene = 'hellpod entry', id = 'hellpod_entry', label = 'Hellpod to Loadout',
+    hint = 'Climbing into the hellpod and the camera moving to the drop location map.' },
+  { scene = 'drop zoom', id = 'drop_zoom', label = 'Drop Location Zoom',
+    hint = 'The zoom after you pick a drop point. In a squad, only the host can speed it up.' },
 }
--- END SIGNATURES
-
--- BEGIN SIGNATURE ENGINE (tools/sigscan.lua, written by research/signatures.py: edit it there)
--- Signature engine v1: finds game.dll code by signatures and reads values from the matched code.
--- Canonical copy: tools/sigscan.lua in the workspace. Each mod's research/signatures.py writes this block and the
--- mod's SIGS table into its script (tools/sigspec.py), so every mod carries the same engine.
---
--- A signature is {name, rva, text, fields, optional}: text is hex bytes with '??' wildcards; rva is where the
--- generating build had it. fields = {field = {kind, {offset...}, {next...}}}: kind 'u8' / 'u32' (a value inside the
--- matched code), 'rip' (a global: the target of a rip-relative operand) or 'call' (a function: the target of a rel32
--- call); offset = each occurrence's byte position in the pattern, next = the end of its instruction. Every occurrence
--- must agree, and a field shared by several signatures must agree across them.
---
---   local code = sigscan.new(SIGS, read, base, validate)  -- read(address, size) -> string or nil; base = game.dll
---                                                        -- base; validate (optional) = {name = function(rva) -> bool}:
---                                                        -- extra checks a match must pass (decoys don't count)
---   code:start()                                 -- tries each signature at its rva; true when all were there
---   code:step()                                  -- else: one chunk of the search per call; true when finished
---   code.found[name] (rva), code.missing[name] (reason), code.values[field], code.problems (list)
-local sigscan = {}
-do
-    local CHUNK, OVERLAP = 0x400000, 256
-
-    local function u16(b, o) return b:byte(o + 1) + 256 * b:byte(o + 2) end
-    local function u32(b, o)
-        local x1, x2, x3, x4 = b:byte(o + 1, o + 4)
-        return x1 + 256 * x2 + 65536 * x3 + 16777216 * x4
+local ROW_OF = {}
+local HOW = ' Fast: 8x speed. Instant: at once.'
+local menu = chef.has and chef.has('menu') and chef.option and chef.get
+if menu then chef.title(TITLE) end
+for _, row in ipairs(ROWS) do
+  ROW_OF[row.scene] = row
+  if menu then
+    chef.option(row.id, { type = 'choice', label = row.label, hint = row.hint .. HOW,
+                          choices = { 'Off', 'Fast (x8)', 'Instant' }, default = DEFAULT_MODE })
+    if chef.on_change then
+      chef.on_change(row.id, function(v) log('OPTION %s: %s', row.label, tostring(MODE_NAMES[v] or v)) end)
     end
-    local function i32(b, o)
-        local v = u32(b, o)
-        return v >= 2147483648 and v - 4294967296 or v
-    end
-
-    local function parse(sig)
-        local bytes = {}
-        for part in sig.text:gmatch('%S+') do bytes[#bytes + 1] = part ~= '??' and tonumber(part, 16) or false end
-        local best_at, best_len, at, len = 1, 0, nil, 0  -- the longest run of fixed bytes is searched for
-        for i = 1, #bytes + 1 do
-            if bytes[i] then
-                if not at then at, len = i, 0 end
-                len = len + 1
-                if len > best_len then best_at, best_len = at, len end
-            else
-                at = nil
-            end
-        end
-        local anchor = {}
-        for i = best_at, best_at + best_len - 1 do anchor[#anchor + 1] = string.char(bytes[i]) end
-        sig.bytes, sig.anchor, sig.anchor_at = bytes, table.concat(anchor), best_at - 1
-    end
-
-    local function matches(blob, pos, sig)  -- pos: 1-based start in blob
-        local bytes = sig.bytes
-        if pos < 1 or pos + #bytes - 1 > #blob then return false end
-        for i = 1, #bytes do
-            local b = bytes[i]
-            if b and blob:byte(pos + i - 1) ~= b then return false end
-        end
-        return true
-    end
-
-    local Scanner = {}
-    Scanner.__index = Scanner
-
-    function sigscan.new(sigs, read, base, validate)
-        return setmetatable({sigs = sigs, read = read, base = base, validate = validate or {}, found = {}, missing = {},
-                             moved = {}, values = {}, problems = {}, scan = nil, done = false}, Scanner)
-    end
-
-    function Scanner:valid(name, rva)
-        local check = self.validate[name]
-        if not check then return true end
-        local ok, good = pcall(check, rva)
-        return ok and good and true or false
-    end
-
-    -- game.dll's sections: {rva, size, exec}.
-    function Scanner:load_sections()
-        local read, base = self.read, self.base
-        local dos = read(base, 0x40)
-        local pe = dos and dos:sub(1, 2) == 'MZ' and u32(dos, 0x3c)
-        local nt = pe and pe < 0x10000 and read(base + pe, 0x18)
-        if not nt or nt:sub(1, 4) ~= 'PE\0\0' then return nil end
-        local count, opt = u16(nt, 6), u16(nt, 20)
-        local headers = count <= 96 and read(base + pe + 24 + opt, count * 40)
-        if not headers then return nil end
-        local sections = {}
-        for i = 0, count - 1 do
-            local size, rva, flags = u32(headers, i * 40 + 8), u32(headers, i * 40 + 12), u32(headers, i * 40 + 36)
-            if size > 0 then
-                sections[#sections + 1] = {rva = rva, size = size, exec = math.floor(flags / 0x20000000) % 2 == 1}
-            end
-        end
-        return sections
-    end
-
-    function Scanner:in_section(rva, exec)
-        for _, s in ipairs(self.sections) do
-            if s.exec == exec and rva >= s.rva and rva + 8 <= s.rva + s.size then return true end
-        end
-        return false
-    end
-
-    -- Tries every signature at its rva and starts a search for the others. True when all were there (done), false
-    -- when a search started, nil and a reason when game.dll is unreadable.
-    function Scanner:start()
-        self.sections = self:load_sections()
-        if not self.sections then return nil, 'game.dll headers unreadable' end
-        local wanted = {}
-        for _, sig in ipairs(self.sigs) do
-            parse(sig)
-            local blob = self.read(self.base + sig.rva, #sig.bytes)
-            if blob and matches(blob, 1, sig) and self:valid(sig.name, sig.rva) then
-                self.found[sig.name] = sig.rva
-            else
-                wanted[#wanted + 1] = sig
-            end
-        end
-        if #wanted == 0 then
-            self:resolve()
-            return true
-        end
-        local exec = {}
-        for _, s in ipairs(self.sections) do if s.exec then exec[#exec + 1] = s end end
-        self.scan = {sections = exec, section = 1, offset = 0, wanted = wanted, hits = {}}
-        for _, sig in ipairs(wanted) do self.scan.hits[sig.name] = {} end
-        return false
-    end
-
-    -- One chunk of the search (every match is collected: a signature must match exactly once). True when finished.
-    function Scanner:step()
-        local scan = self.scan
-        if not scan then return true end
-        local s = scan.sections[scan.section]
-        if s then
-            local from = scan.offset
-            local size = math.min(CHUNK + OVERLAP, s.size - from)
-            local pieces = {}
-            local blob = self.read(self.base + s.rva + from, size)
-            if blob then
-                pieces[1] = {from, blob}
-            else
-                for off = from, from + size - 1, 0x10000 do  -- skip unreadable pages
-                    local piece = self.read(self.base + s.rva + off, math.min(0x10000 + OVERLAP, s.size - off))
-                    if piece then pieces[#pieces + 1] = {off, piece} end
-                end
-            end
-            for _, piece in ipairs(pieces) do
-                local piece_from, data = piece[1], piece[2]
-                for _, sig in ipairs(scan.wanted) do
-                    local init = 1
-                    while true do
-                        local at = data:find(sig.anchor, init, true)
-                        if not at then break end
-                        local start = at - sig.anchor_at
-                        local offset = piece_from + start - 1
-                        -- Matches starting in the overlap belong to the next chunk.
-                        if offset >= from and offset < from + CHUNK and matches(data, start, sig)
-                           and self:valid(sig.name, s.rva + offset) then
-                            local hits = scan.hits[sig.name]
-                            hits[#hits + 1] = s.rva + offset
-                        end
-                        init = at + 1
-                    end
-                end
-            end
-            scan.offset = from + CHUNK
-            if scan.offset >= s.size then scan.section, scan.offset = scan.section + 1, 0 end
-            if scan.sections[scan.section] then return false end
-        end
-        for _, sig in ipairs(scan.wanted) do
-            local hits = scan.hits[sig.name]
-            if #hits == 1 then
-                self.found[sig.name] = hits[1]
-                self.moved[#self.moved + 1] = sig.name
-            else
-                self.missing[sig.name] = #hits == 0 and 'not found' or ('found ' .. #hits .. ' times')
-            end
-        end
-        self.scan = nil
-        self:resolve()
-        return true
-    end
-
-    -- A field's value from the matched code; nil and a reason if its occurrences disagree or it points nowhere.
-    function Scanner:field_value(sig, rva, spec)
-        local blob = self.read(self.base + rva, #sig.bytes)
-        if not blob then return nil, 'unreadable' end
-        local value
-        for k, off in ipairs(spec[2]) do
-            local v
-            if spec[1] == 'u8' then v = blob:byte(off + 1)
-            elseif spec[1] == 'u32' then v = u32(blob, off)
-            else v = rva + spec[3][k] + i32(blob, off) end
-            if value and v ~= value then return nil, 'occurrences disagree' end
-            value = v
-        end
-        if spec[1] == 'rip' and not self:in_section(value, false) then return nil, 'global not in a data section' end
-        if spec[1] == 'call' and not self:in_section(value, true) then return nil, 'function not in a code section' end
-        return value
-    end
-
-    -- Reads every field of the found signatures. A signature whose fields don't read becomes missing; a field that
-    -- differs between signatures is dropped (nil) and listed in problems.
-    function Scanner:resolve()
-        local seen = {}
-        for _, sig in ipairs(self.sigs) do
-            local rva = self.found[sig.name]
-            if rva then
-                local got = {}
-                for name, spec in pairs(sig.fields or {}) do
-                    local v, why = self:field_value(sig, rva, spec)
-                    if not v then
-                        self.missing[sig.name] = string.format('field "%s" %s', name, why)
-                        self.found[sig.name] = nil
-                        got = nil
-                        break
-                    end
-                    got[name] = v
-                end
-                for name, v in pairs(got or {}) do
-                    if seen[name] ~= nil and seen[name] ~= v then
-                        self.problems[#self.problems + 1] = string.format('"%s" differs between signatures', name)
-                        seen[name] = false
-                    elseif seen[name] == nil then
-                        seen[name] = v
-                    end
-                end
-            end
-        end
-        for name, v in pairs(seen) do self.values[name] = v or nil end
-        self.done = true
-    end
-
-    -- The address of a found signature's match (plus an offset), or nil.
-    function Scanner:address(name, offset)
-        local rva = self.found[name]
-        return rva and self.base + rva + (offset or 0)
-    end
-
-    -- Every missing signature as 'name (reason)', for logs and status files.
-    function Scanner:missing_list()
-        local out = {}
-        for _, sig in ipairs(self.sigs) do
-            if self.missing[sig.name] then out[#out + 1] = sig.name .. ' (' .. self.missing[sig.name] .. ')' end
-        end
-        return out
-    end
+  end
 end
--- END SIGNATURE ENGINE
+ROW_OF['lobby change'] = ROW_OF.FTL   -- the same row: the shots of the same scene family
 
----------------------------------------------------------------------------------------
--- Configuration
-
--- Each feature is a Mod Options Menu choice; the value is the index into its modes (MODES, QUICK_MODES for the skips
--- too short for a key press, SWITCH_MODES for the speed boost).
-local OPTION_PREFIX = 'alomare.skip_intro_animation.'
-local MODES = {'off', 'key', 'auto'}
-local QUICK_MODES = {'off', 'auto'}
-local SWITCH_MODES = {'off', 'on'}
-local MODE_NAMES = {off = 'Off', key = 'Manual', auto = 'Automatic', on = 'On'}
--- The intro, the hellpod entry, the zoom and the speed boost are not cutscene scenes: they have no scenes, the mod
--- follows the title screen, the seat, the loadout screen and the movement record instead.
-local FEATURES = {
-    {id = 'intro', label = 'Intro cinematics', text = 'intro', scenes = {}, modes = QUICK_MODES},
-    {id = 'login', label = 'Log-in ship intro', text = 'login', scenes = {'ship_intro', 'ship_bridge_intro'}},
-    {id = 'pod', label = 'Cryo pod transition', text = 'pod', scenes = {'ship_teleporter_arrival'}},
-    {id = 'ftl', label = 'FTL transition', text = 'ftl',
-     scenes = {'ship_planet_departure', 'ship_planet_arrival', 'ship_teleporter_network_join'}},
-    {id = 'hellpod', label = 'Hellpod to loadout', text = 'hellpod', scenes = {}, modes = QUICK_MODES},
-    {id = 'zoom', label = 'Drop location zoom', text = 'zoom', scenes = {}, modes = QUICK_MODES},
-    {id = 'shipspeed', label = 'Ship walk speed boost', text = 'shipspeed', scenes = {}, modes = SWITCH_MODES, default = 1,
-     normal = 'the ship speed is normal'},
-}
-local BINDING = 'alomare.skip_intro_animation.skip'
-local MAP_BINDING = 'alomare.skip_intro_animation.map'  -- Mod Bindings Menu key that closes the map, beside Escape
--- Hellpod entry: on the ship (game state 3), the local Helldiver's seat moving into one of the ship's hellpods. Its
--- seat record (64 bytes): +0 seat collection (the hellpod's entity id), moving byte, target node and deadline (offsets
--- from the code). Then the Hellpod briefing (presenter 14) and its loadout screen (MenuScreenType 11), whose intro
--- phase 1 waits a timer before the UI is built.
--- Waits are in seconds of game time (the frame rate doesn't shorten them): seat_timeout for the moved seat to arrive,
--- briefing_wait for the intro.
-local HELLPOD = {ship_state = 3, briefing = 14, screen_type = 11, intro_waiting = 1, record_size = 0x40,
-                 max_pods = 16, idle_every = 10, max_ahead = 30e6, seat_timeout = 3, briefing_wait = 5}
--- Fast-forward waits, in seconds of game time. A timed phase whose timer the game keeps resetting stops after
--- TIMEOUT; a phase whose timer is over and that waits on loading or other players is followed as long as it lasts.
--- Drop location zoom: picking a drop location on the map (page 0 of the loadout screen) sets the screen's zoom
--- target to 1; with players in the drop group, its zoom progress then moves toward it at 1 per second, and the screen
--- opens the loadout page (1) once both are 1. Without players (a squad client), a screen that doesn't lead waits for
--- the synced progress instead.
-local ZOOM = {map_page = 0, loadout_page = 1, idle_every = 10}
-local TIMEOUT = 20
-local CHAIN = 30       -- how long an ended scene waits for a follow-up one (joining a lobby: 15 12 11 15 13), and how
-                       -- long after a Manual scene a press made between scenes (a loading screen) still counts
-local PRESS_KEEP = 0.5 -- a press not used at once stays pending this long (a scene seen a frame later)
-
--- Scene layout: ids around the current one (previous, current, queued); the scene context at manager + 0x60
--- starts with the phase; the clock and timer stamps come from the code.
-local SCENE = {context = 0x60, max_id = 64, max_phase = 32}
--- Fast-forward plans: per scene, per phase, the timer check (signature) whose stamp and wait are read from the code.
-local WARP_PLANS = {
-    ship_intro = {[1] = {sig = 't7p1'}, [2] = {sig = 't7p2'}},
-    ship_bridge_intro = {
-        [2] = {sig = 't3_2s'}, [3] = {sig = 't3_125'}, [4] = {sig = 't3_175'}, [5] = {sig = 't3_25'},
-        [6] = {sig = 't3_1s'}, [7] = {sig = 't3_15'}, [8] = {sig = 't3_1s'}, [9] = {sig = 't3_1s'},
-        [10] = {sig = 't3_1s'}, [11] = {sig = 't3_2s'}, [12] = {sig = 't3_2s'},
-    },
-    ship_teleporter_arrival = {
-        [2] = {sig = 't13p2'},
-        [3] = {sig = 't13p3', hold_frames = 30},  -- the game places the body
-        [4] = {sig = 't13p4'},
-    },
-    ship_planet_departure = {[3] = {sig = 't12p3'}},
-    ship_planet_arrival = {[2] = {sig = 't11p2'}},
-    ship_teleporter_network_join = {[3] = {sig = 't15p3'}},
-}
-local FADE_SCENES = {ship_planet_departure = true, ship_planet_arrival = true}
--- The galactic map: the Hologram menu presenter. Outside it the presenter is looked at every MAP_IDLE frames. Its key
--- is Escape (the option ESC Closes Galactic Map; Off leaves Escape to the game, which backs out one level per press).
-local HOLOGRAM, MAP_IDLE = 15, 10
-local ESCAPE_NAMES, VK_ESCAPE = {'esc', 'escape'}, 0x1b
--- Ship walk speed boost: on the ship (game state 3) the local Helldiver's private movement record (copy_size bytes,
--- the size the resolver's code proves) gets its speeds times `factor`, up to the game's own cap (read from the code);
--- looked at every `every` frames (the Helldiver looked up again at least every `lookup_every`). Speeds are those the
--- movement update reads (offsets from the code).
-local SPEED = {factor = 3, ship_state = 3, every = 15, lookup_every = 300, copy_size = 0x354, max_copies = 256,
-               fields = {'speed_walk', 'speed_jog', 'speed_sprint', 'speed_sprint_exhausted', 'speed_aim',
-                         'speed_crouch_walk', 'speed_crouch_jog', 'speed_crouch_sprint', 'speed_crouch_aim',
-                         'speed_prone'}}
--- Intro cinematics: the game's state list holds the title object while the title screen is up. Before the first one
--- the title is looked for every frame (after waiting up to menu_wait frames for Mod Options Menu's setting), then
--- every `every` frames. Nothing is set once the game is on the ship (game state 3) or in a mission (4).
-local INTRO = {max_states = 256, menu_wait = 60, every = 10, mission_state = 4}
-
----------------------------------------------------------------------------------------
--- Logging and status
-
-local function open_log(name)
-    if loader and type(loader.open_log) == 'function' then
-        local ok, f = pcall(loader.open_log, name)
-        if ok then return f end
-    end
+local function mode_of(name)
+  local v = menu and chef.get(ROW_OF[name].id)
+  return (v == OFF or v == FAST_MODE or v == INSTANT) and v or DEFAULT_MODE
 end
 
-local log_file = open_log('ImpatientDiver.log')
-local log_lines = 0
-
-local function note(msg)
-    if not log_file or log_lines >= 5000 then return end
-    log_lines = log_lines + 1
-    pcall(function()
-        log_file:write(string.format('[f%d t%.1f] %s\n', M.frames, os.clock(), msg))
-        log_file:flush()
-    end)
+-- ------------------------------------------------------------------ worlds
+-- worlds print alike, so each gets a number found by ==
+local worlds, next_world = {}, 1
+local main_e = nil           -- the main world's entry
+local function entry(w)
+  for _, e in ipairs(worlds) do
+    if e.world == w then return e end
+  end
+  local e = { world = w, n = next_world, count = -1, kinds = {}, cams = {}, cam_seq = 0, cannons = false }
+  next_world = next_world + 1
+  worlds[#worlds + 1] = e
+  log('WORLD %d new, %.2f s after launch', e.n, clock())
+  return e
 end
 
-local function write_status(lines)
-    local f = open_log('ImpatientDiver_STATUS.log')
-    if not f then return end
-    pcall(function()
-        f:write(table.concat(lines, '\n') .. '\n')
-        f:close()
-    end)
+local function listed(e)
+  for _, x in ipairs(worlds) do
+    if x == e then return true end
+  end
+  return false
 end
 
----------------------------------------------------------------------------------------
--- Texts (mod_text: src/bingus_text.lua and locales/, placed ahead of this script by the build)
+local function kind_of(u)
+  local text = tostring(u)
+  return text:match('#ID%[(%x+)%]') or text
+end
 
-local T = mod_text.module
-local tr = T.new(mod_text.locales.en, mod_text.locales.bundled, function(message) note('Text: ' .. message) end)
+-- a world's kinds counted: what it holds of the scenes' markers (a line when a small world's change)
+local function take_kinds(e, counts)
+  e.kinds = counts
+  e.diver = counts[HELLDIVER] ~= nil
+  local had = e.cannons
+  e.cannons = false
+  for _, k in ipairs(CANNONS) do
+    if counts[k] then e.cannons = true end
+  end
+  if e.cannons and not had then e.cannons_at = clock() end
+  if e.count > SMALL then return end
+  local shows = {}
+  if e.cannons then shows[#shows + 1] = 'cannons' end
+  if counts[LAUNCH_KIND] then shows[#shows + 1] = 'the launch kind' end
+  if counts[MAP_KIND] then shows[#shows + 1] = 'the map floor' end
+  if e.diver then shows[#shows + 1] = 'a Helldiver' end
+  local text = table.concat(shows, ', ')
+  if text ~= (e.shows or '') then
+    e.shows = text
+    log('WORLD %d (%d units) %s', e.n, e.count, text == '' and 'shows no marker now' or 'shows ' .. text)
+  end
+end
 
--- Mod Options Menu v1.1+ (version 2) and Mod Bindings Menu v2.1+ (version 3) take texts as functions and call them
--- when their pages open, so the texts follow the game's language; older versions take strings with byte limits,
--- where a translation that does not fit stays English. One function per key, so repeated registrations agree.
-local text_functions = {}
-local function host_text(host, functions_from, key, bytes)
-    if (tonumber(host.version) or 1) >= functions_from then
-        local fn = text_functions[key]
-        if not fn then fn = function() return tr(key) end; text_functions[key] = fn end
-        return fn
+-- one record per camera unit followed (its field of view, what was logged last, and when); kept while its unit is
+-- still listed
+local function records(e, units)
+  local by = {}
+  for _, r in ipairs(e.cams) do by[r.unit] = r end
+  local out = {}
+  for i, u in ipairs(units) do
+    local r = by[u]
+    if not r then
+      e.cam_seq = e.cam_seq + 1
+      r = { unit = u, label = e.n .. '.' .. e.cam_seq }
     end
-    local value = tr(key)
-    return #value <= bytes and value or tr.english[key]
+    out[i] = r
+  end
+  e.cams = out
 end
 
----------------------------------------------------------------------------------------
--- Native memory
-
-local native = {}
-
--- Every mod shares one FFI namespace, and a name declared first keeps its declaration (a later ffi.cdef of it fails):
--- the Windows functions are declared under our own names (asm aliases), so other mods' declarations can't change them.
-local function init_native()
-    for _, decl in ipairs({
-        'void *imd_GetCurrentProcess(void) __asm__("GetCurrentProcess");',
-        'void *imd_GetModuleHandleA(const char *name) __asm__("GetModuleHandleA");',
-        'int imd_ReadProcessMemory(void *process, const void *address, void *buffer, size_t size, size_t *read) '
-            .. '__asm__("ReadProcessMemory");',
-        'int imd_WriteProcessMemory(void *process, void *address, const void *buffer, size_t size, size_t *written) '
-            .. '__asm__("WriteProcessMemory");',
-        'unsigned int imd_GetCurrentProcessId(void) __asm__("GetCurrentProcessId");',
-    }) do pcall(ffi.cdef, decl) end
-    local ok, k32 = pcall(ffi.load, 'kernel32')
-    if not ok then return false, 'kernel32 unavailable' end
-    native.k32, native.process = k32, k32.imd_GetCurrentProcess()
-    local game = k32.imd_GetModuleHandleA('game.dll')
-    if game == nil then return false, 'game.dll not loaded' end
-    native.base = tonumber(ffi.cast('uint64_t', game))
-    return true
+local function add_camera(u, kind, list)
+  if kind == CAMERA_KIND and Unit.alive(u) then
+    local n = Unit.num_cameras(u)
+    if type(n) == 'number' and n > 0 then list[#list + 1] = u end
+  end
 end
 
-local function read(address, size)
-    local buf, got = ffi.new('uint8_t[?]', size), ffi.new('size_t[1]')
-    if native.k32.imd_ReadProcessMemory(native.process, ffi.cast('const void *', address), buf, size, got) == 0
-       or tonumber(got[0]) ~= size then
-        return nil
+-- a small world, counted again whenever its unit count changes (its cameras listed too)
+local function recount(e)
+  local counts, cams = {}, {}
+  for _, u in pairs(World.units(e.world)) do
+    local kind = kind_of(u)
+    counts[kind] = (counts[kind] or 0) + 1
+    add_camera(u, kind, cams)
+  end
+  e.small_cams = cams
+  take_kinds(e, counts)
+end
+
+local next_scan, last_scan = 0, -1
+local ship_seen = false
+
+-- a ship loaded again since `t` and still there (a lobby change reloads it under the destroyer's outside shot)
+local function ship_reloaded_since(t)
+  for _, e in ipairs(worlds) do
+    if t and e.reloaded_at and e.reloaded_at >= t and e.count > SHIP then return true end
+  end
+  return false
+end
+
+-- a ship emptied since `t` (the old one, as a lobby change's outside shot begins)
+local function ship_emptied_since(t)
+  for _, e in ipairs(worlds) do
+    if t and e.emptied_at and e.emptied_at >= t - EMPTIED_EARLY then return true end
+  end
+  return false
+end
+
+local function watch_worlds(now)
+  local main = Application.main_world()
+  local seen, me = {}, nil
+  for _, w in pairs(Application.worlds()) do
+    local e = entry(w)
+    seen[e] = true
+    if w == main then me = e end
+    local n = World.num_units(w)
+    if n ~= e.count then
+      -- a ship loaded (again, once one was seen: a lobby change, or the return from a mission), or emptied
+      if n > SHIP and e.count <= SHIP then
+        e.loaded_at = now
+        if ship_seen then e.reloaded_at = now end
+      elseif n <= SHIP and e.count > SHIP then
+        e.emptied_at = now
+      end
+      e.count = n
+      if n <= SMALL then recount(e) end
     end
-    return ffi.string(buf, size)
-end
-
-local function write(address, bytes)
-    local got = ffi.new('size_t[1]')
-    local ok = native.k32.imd_WriteProcessMemory(native.process, ffi.cast('void *', address), bytes, #bytes, got)
-    return ok ~= 0 and tonumber(got[0]) == #bytes
-end
-
-local function u32(blob, offset)
-    offset = offset or 0
-    if not blob or #blob < offset + 4 then return nil end
-    local v = ffi.new('uint32_t[1]')
-    ffi.copy(v, blob:sub(offset + 1, offset + 4), 4)
-    return tonumber(v[0])
-end
-
-local function i32(blob, offset)
-    local v = u32(blob, offset)
-    if v and v >= 2147483648 then v = v - 4294967296 end
-    return v
-end
-
-local function u64(blob)
-    if not blob or #blob ~= 8 then return nil end
-    local v = ffi.new('uint64_t[1]')
-    ffi.copy(v, blob, 8)
-    return v[0]
-end
-
-local function pointer(blob)
-    local v = u64(blob)
-    if not v then return nil end
-    local a = tonumber(v)
-    if a < 0x10000 or a >= 0x800000000000 then return nil end
-    return a
-end
-
-local function f32(blob)
-    if not blob or #blob ~= 4 then return nil end
-    local v = ffi.new('float[1]')
-    ffi.copy(v, blob, 4)
-    return tonumber(v[0])
-end
-
-local function byte_at(address)
-    local b = read(address, 1)
-    return b and b:byte()
-end
-
-local ZERO32 = string.rep('\0', 4)
-
----------------------------------------------------------------------------------------
--- Resolution: signatures -> what each feature can use
-
-local code = nil  -- the signature engine
-local V = {}      -- values read from the matched code (offsets, waits; globals as rvas)
-local derived = {}  -- manager/clock/fader globals (rva), scene ids by name
-
--- Reads the scene names from the id-to-name switch at rva (pure reads); nil if it isn't that switch.
-local function scene_names(rva)
-    local head = read(native.base + rva, 30)
-    if not head then return nil end
-    local count = head:byte(5) + 1
-    local table_rva = u32(head, 21)
-    local image_disp = i32(head, 14)
-    if count > SCENE.max_id or not table_rva or not image_disp or rva + 18 + image_disp ~= 0 then return nil end
-    local jumps = read(native.base + table_rva, count * 4)
-    if not jumps then return nil end
-    local ids = {}
-    for id = 1, count do
-        local at = u32(jumps, (id - 1) * 4)
-        local lea = at and read(native.base + at, 8)
-        if not lea or lea:sub(1, 3) ~= '\x48\x8d\x05' or lea:byte(8) ~= 0xc3 then return nil end
-        local text = read(native.base + at + 7 + i32(lea, 3), 48)
-        local name = text and text:match('^([%w_]+)%z')
-        if not name then return nil end
-        ids[name] = id
+  end
+  for i = #worlds, 1, -1 do
+    if not seen[worlds[i]] then
+      log('WORLD %d gone', worlds[i].n)
+      table.remove(worlds, i)
     end
-    return ids
+  end
+  if me ~= main_e then
+    main_e = me
+    log('MAIN world %s (%s units)', me and me.n or '-', me and me.count or '-')
+    -- its cameras found at once (not on every frame while a mission loads: the main world swaps back and forth then),
+    -- and always for the ship's first load: the walk to the bridge is told by its camera, and may be short
+    if now - last_scan >= SCAN_AGAIN or not ship_seen then next_scan = 0 end
+  end
 end
 
-local state = {ready = false, started = false, menu = nil, scene_feature = {}, plans = {}, map = {escape = true}}
-
-local function derive()
-    for k, v in pairs(code.values) do V[k] = v end
-    if code.found.interrupt_site then derived.manager = V.manager end
-    if code.found.t13p2 then derived.clock = V.clock end
-    if code.found.fader then derived.fader = V.fader end
-    if code.found.names then derived.scene_ids = scene_names(code.found.names) end
-    if code.found.names and not derived.scene_ids then note('Scene name table not recognized') end
-    if code.found.game_state then derived.game = V.game end
+-- the big worlds' kinds, and the main world's cameras
+local function scan()
+  local t0 = clock()
+  last_scan = t0
+  for _, e in ipairs(worlds) do
+    if e.count > SMALL and e.count <= SCAN_MOST then
+      local main = e == main_e
+      local counts, cams = {}, {}
+      for _, u in pairs(World.units(e.world)) do
+        local kind = kind_of(u)
+        counts[kind] = (counts[kind] or 0) + 1
+        if main then add_camera(u, kind, cams) end
+      end
+      take_kinds(e, counts)
+      if main then records(e, cams) end
+    end
+  end
+  local ms = (clock() - t0) * 1000
+  if ms > SCAN_SLOW then log('scan took %.1f ms', ms) end
 end
 
--- The galactic map exit: usable when the presenter manager, its close requests and the Hologram request are known.
-local function map_usable()
-    for _, name in ipairs({'presenters', 'presenter_open', 'presenter_update', 'hologram_request'}) do
-        if not code.found[name] then return false, 'code "' .. name .. '" ' .. (code.missing[name] or 'not found') end
-    end
-    for _, k in ipairs({'ui', 'presenters', 'depth', 'current_presenter', 'collection', 'holo_slot', 'close_flag'}) do
-        if not V[k] then return false, 'value "' .. k .. '" unavailable' end
-    end
-    -- The Hologram case must be inside the close-request check the update calls.
-    local at = code.found.hologram_request
-    if not V.check or at < V.check or at > V.check + 0x400 then return false, 'the close-request check moved' end
-    -- Optional: the chat's text input, while which the keys are ignored (else they always count).
-    state.map.chat = (code.found.chat_notice and code.found.chat_input and V.hud and V.chat_hud and V.chat_open)
-                     and true or false
-    return true
+-- ------------------------------------------------------------------ the main camera
+-- the main world's first camera (the player's, and the cutscenes'; the only one that moves): its field of view, read
+-- every frame
+local function watch_cam()
+  local r = main_e and main_e.cams[1]
+  if not r then return end
+  if not Unit.alive(r.unit) then
+    r.dead = true
+    return
+  end
+  local c = Unit.camera(r.unit, 1)
+  if not c then return end
+  r.fov = Camera.vertical_fov(c)
 end
 
--- The hellpod entry: usable when the local Helldiver, its seat record, the ship's hellpods and the game state are
--- known. The briefing intro part also needs the presenter manager and the loadout screen (else only the seat).
-local function hellpod_usable()
-    for _, name in ipairs({'local_ref', 'ref_resolver', 'seaters', 'seat_wait', 'hellpods', 'game_state'}) do
-        if not code.found[name] then return false, 'code "' .. name .. '" ' .. (code.missing[name] or 'not found') end
-    end
-    -- The avatar lookup must call the resolver found (its body starts 4 bytes in, after `sub rsp, 8`).
-    if V.resolver ~= code.found.ref_resolver - 4 then return false, 'the avatar lookup calls another resolver' end
-    local found = {'seat transition'}
-    state.hellpod_intro = (code.found.screen and code.found.briefing_intro and code.found.presenters
-                           and code.found.presenter_open and V.ui and V.presenters and V.current_presenter) and true
-                          or false
-    if state.hellpod_intro then found[#found + 1] = 'briefing intro' end
-    return true, '', found
+-- the ship's first camera, when the ship is the main world
+local function ship_cam()
+  local r = main_e and main_e.count > SHIP and main_e.cams[1]
+  if r and not r.dead and r.fov ~= nil then return r end
 end
 
--- The drop location zoom: usable when the loadout screen, its page and the zoom's target and progress are known.
-local function zoom_usable()
-    for _, name in ipairs({'loadout_page', 'zoom_ramp', 'screen', 'presenters', 'presenter_open'}) do
-        if not code.found[name] then return false, 'code "' .. name .. '" ' .. (code.missing[name] or 'not found') end
-    end
-    for _, k in ipairs({'page', 'zoom_group', 'zoom_players', 'zoom_target', 'zoom_progress', 'zoom_synced',
-                        'zoom_leader', 'ui', 'presenters',
-                        'current_presenter', 'screen_stack', 'screen_slot'}) do
-        if not V[k] then return false, 'value "' .. k .. '" unavailable' end
-    end
-    return true, '', {'map zoom'}
+-- ------------------------------------------------------------------ the Helldiver
+-- Our Helldiver (only its posture counts: never another player's): the only one while solo; the one whose game object
+-- this game owns, if the session can say (so far it never could: no unit synchronizer, it seems); after joining
+-- another's session, the only one in the cryo pod; else the one the camera follows (found while the player walks).
+-- Kept once known while its unit lives and its world still holds the ship, even while another world is the main one
+-- (as a client, the FTL's outside world can be); let go in a mission.
+-- (`last`: the last posture read for ours, kept after ours is let go, until a mission starts)
+local diver = { unit = nil, world = nil, said = nil, next = 0, posture = nil, now = nil, all = {}, last = nil }
+local ours = { unit = nil, e = nil, how = nil }
+
+local function forget_ours(why)
+  if not ours.unit then return end
+  log('HELLDIVER ours gone (%s)', why)
+  ours.unit, ours.e, ours.how = nil, nil, nil
+end
+local joined_at = nil        -- when this game joined another's session (it was host, now isn't)
+local has_sm = {}            -- per unit: it has an animation state machine (asked once a world)
+local follow = { next = 0, cam = nil, last = {}, score = {} }
+
+local function other_players()
+  local n = chef.players and chef.players()
+  return type(n) == 'number' and n > 1
 end
 
--- The speed boost: usable when the local Helldiver, the game state, its private record and every speed the movement
--- update reads from it, and the speed cap are known.
-local function speed_usable()
-    for _, name in ipairs({'local_ref', 'ref_resolver', 'game_state', 'avatar_copy', 'speed_record', 'speeds_crouch',
-                           'speeds_stand', 'speeds_walk', 'speed_cap'}) do
-        if not code.found[name] then return false, 'code "' .. name .. '" ' .. (code.missing[name] or 'not found') end
-    end
-    if V.resolver ~= code.found.ref_resolver - 4 then return false, 'the avatar lookup calls another resolver' end
-    -- The movement update must read its speeds from the record the resolver found returns.
-    if V.speed_resolver ~= code.found.avatar_copy then return false, 'the movement update reads another record' end
-    local span = 0
-    for _, k in ipairs(SPEED.fields) do
-        if not V[k] then return false, 'value "' .. k .. '" unavailable' end
-        span = math.max(span, V[k] + 4)
-    end
-    for _, k in ipairs({'avatars', 'copy_map', 'copy_capacity', 'copy_empty', 'copy_multiplier', 'copies'}) do
-        if not V[k] then return false, 'value "' .. k .. '" unavailable' end
-    end
-    local cap = f32(read(native.base + V.speed_cap, 4))
-    if not cap or cap ~= cap or cap <= 0 or cap > 100 then return false, 'the speed cap is unreadable' end
-    SPEED.span, SPEED.cap = span, cap
-    return true, '', {string.format('ship movement record, capped at %g m/s', cap)}
+local function dist(ax, ay, az, bx, by, bz)
+  local dx, dy, dz = ax - bx, ay - by, az - bz
+  return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
--- The intro skip: usable when the game object's no-intro flag, the title object, its setup and its video queue are
--- known, and the setup and queue checks are the ones the title's update runs.
-local function intro_usable()
-    for _, name in ipairs({'game_state', 'title_enter', 'title_register', 'title_update', 'title_setup',
-                           'title_queue'}) do
-        if not code.found[name] then return false, 'code "' .. name .. '" ' .. (code.missing[name] or 'not found') end
-    end
-    for _, k in ipairs({'game', 'intro_flag', 'title_no_intro', 'states', 'title_type', 'title_count', 'title_entries',
-                        'title_set_up', 'title_setup', 'title_has_player', 'title_queued'}) do
-        if not V[k] then return false, 'value "' .. k .. '" unavailable' end
-    end
-    local setup, update = code.found.title_setup, code.found.title_update
-    if setup < V.title_setup or setup > V.title_setup + 0x1000 then return false, 'the title setup moved' end
-    if code.found.title_queue < update or code.found.title_queue > update + 0x1000 then
-        return false, 'the intro video queue moved'
-    end
-    return true, '', {'title screen no-intro start'}
+local function position(u)
+  if chef.unit_position then return chef.unit_position(u) end
+  if not Unit.alive(u) then return nil end
+  return Vector3.to_elements(Unit.world_position(u, 1))
 end
 
--- Writes the status file from the current modes and, once resolved, what each feature can use.
-local function report()
-    if not state.ready then return end  -- still resolving (the map exit is always on); finish_resolution reports
-    local lines, working, broken = {}, 0, 0
-    for _, feature in ipairs(FEATURES) do
-        local text
-        if feature.mode == 'off' then
-            text = feature.label .. ': Off'
-        elseif feature.usable then
-            working = working + 1
-            text = string.format('%s: %s (%s)', feature.label, MODE_NAMES[feature.mode], table.concat(feature.found, ', '))
-        else
-            broken = broken + 1
-            text = feature.label .. ': NOT AVAILABLE, ' .. (feature.normal or 'plays normally') .. ' (' .. feature.why .. ')'
-        end
-        lines[#lines + 1] = text
+-- a unit's posture state, or nil (Unit.animation_get_state answers one state per layer, more than chef.call passes
+-- on, so it's called straight, and only after Unit.alive and Unit.has_animation_state_machine)
+local function posture_of(u)
+  if not Unit.alive(u) then return nil end
+  if has_sm[u] == nil then
+    first('Unit.has_animation_state_machine')
+    has_sm[u] = Unit.has_animation_state_machine(u) == true
+    if not has_sm[u] then log('HELLDIVER %s has no animation state machine', tostring(u)) end
+  end
+  if not has_sm[u] then return nil end
+  first('Unit.animation_get_state')
+  return (select(POSTURE, Unit.animation_get_state(u)))
+end
+
+-- the session's answer: the one avatar whose game object this game owns, or nil and why not
+local function owned_one(all)
+  local session = chef.call('Network.game_session')
+  if not session then return nil, 'no game session' end
+  local me = chef.call('Network.peer_id')
+  if me == nil then return nil, 'no peer id' end
+  local sync = chef.call('GameSession.unit_synchronizer', session)
+  if not sync then return nil, 'no unit synchronizer' end
+  first('UnitSynchronizer.unit_to_game_object_id')
+  local found, mine, owners = nil, 0, {}
+  for i, u in ipairs(all) do
+    local id = chef.call('UnitSynchronizer.unit_to_game_object_id', sync, u)
+    local owner = type(id) == 'number' and chef.call('GameSession.game_object_owner', session, id) or nil
+    owners[i] = tostring(id) .. ':' .. (owner == nil and '?' or owner == me and 'me' or tostring(owner))
+    if owner ~= nil and owner == me then
+      mine = mine + 1
+      found = found or u
     end
-    local map = state.map
-    if map.usable then
-        working = working + 1
-        lines[#lines + 1] = 'Galactic map quick exit: On (' .. (map.escape and 'Escape or the Mod Bindings Menu key'
-                                                                or 'the Mod Bindings Menu key; ESC Closes Galactic Map is Off,')
-                            .. ' closes the map from any level; ' .. (map.chat and 'not while typing in the chat)'
-                                             or 'the chat check is not available, so typing in the chat counts too)')
+  end
+  local list = 'game object:owner ' .. table.concat(owners, ' ')
+  if mine == 1 then return found, 'owned (' .. list .. ')' end
+  return nil, (mine > 1 and 'several owned' or 'none owned') .. ' (' .. list .. ')'
+end
+
+-- just after joining another's session: the only Helldiver in the cryo pod is ours (the joiner's pod plays first)
+local function joiner(now, all)
+  if not joined_at or now - joined_at > JOIN_SECONDS then return nil end
+  local hit = nil
+  for _, u in ipairs(all) do
+    local p = posture_of(u)
+    if p == CRYO_IN or p == CRYO_OUT then
+      if hit then return nil end
+      hit = u
+    end
+  end
+  return hit
+end
+
+-- The camera follows our Helldiver: while it moves (the player walks), ours keeps its offset to it and the others
+-- don't. Ours is the only one that kept it in FOLLOW_SAMPLES moving samples in a row (a still camera tells nothing).
+local function by_camera(now, all)
+  if now < follow.next then return nil end
+  follow.next = now + FOLLOW_SECONDS
+  local r = main_e and main_e.cams[1]
+  if not r or r.dead or not Unit.alive(r.unit) then return nil end
+  local c = Unit.camera(r.unit, 1)
+  if not c then return nil end
+  local cx, cy, cz = Vector3.to_elements(Camera.world_position(c))
+  local prev = follow.cam
+  follow.cam = { cx, cy, cz }
+  local moved = prev and dist(cx, cy, cz, prev[1], prev[2], prev[3]) or 0
+  local last, keeper, keepers = {}, nil, 0
+  for _, u in ipairs(all) do
+    local x, y, z = position(u)
+    if x then
+      local o = { cx - x, cy - y, cz - z }
+      last[u] = o
+      local p = follow.last[u]
+      if moved >= FOLLOW_MOVE and p and dist(o[1], o[2], o[3], p[1], p[2], p[3]) <= FOLLOW_KEEP * moved
+          and dist(o[1], o[2], o[3], 0, 0, 0) <= FOLLOW_NEAR then
+        keepers, keeper = keepers + 1, u
+      end
+    end
+  end
+  follow.last = last
+  if moved < FOLLOW_MOVE then return nil end
+  if keepers ~= 1 then
+    follow.score = {}
+    return nil
+  end
+  local n = (follow.score[keeper] or 0) + 1
+  follow.score = { [keeper] = n }
+  if n < FOLLOW_SAMPLES then return nil end
+  local o = last[keeper]
+  return keeper, fmt('the one the camera follows (%.1f m off, %d moving samples)', dist(o[1], o[2], o[3], 0, 0, 0), n)
+end
+
+local function look_up_diver(now)
+  diver.next = now + DIVER_SECONDS
+  local w = main_e and main_e.world
+  if w ~= diver.world then has_sm, follow.cam, follow.last, follow.score = {}, nil, {}, {} end
+  local all = {}
+  if w then
+    first('World.units_by_resource')
+    local units = World.units_by_resource(w, IdString64.from_hex(HELLDIVER))
+    if type(units) == 'table' then
+      for _, u in pairs(units) do
+        if Unit.alive(u) then all[#all + 1] = u end
+      end
+    end
+  end
+  diver.all = all
+  if ours.unit and not Unit.alive(ours.unit) then forget_ours('its unit')
+  elseif ours.unit and (not listed(ours.e) or ours.e.count <= SHIP) then forget_ours('its world no longer holds the ship')
+  end
+  local found, how = ours.unit, ours.how
+  if found and ours.e ~= main_e then how = how .. ', kept in world ' .. ours.e.n end
+  if not found then
+    how = 'none'
+    local ship = main_e and main_e.count > SHIP   -- ours is taken on the ship only
+    if ship and #all == 1 and not other_players() then found, how = all[1], 'the only one, solo'
+    elseif ship and #all > 0 then
+      local why
+      found, why = owned_one(all)
+      if found then how = why
+      else
+        found = joiner(now, all)
+        how = found and 'the only one in the cryo pod, just joined'
+          or 'not known yet (' .. why .. '; the camera finds it while the player walks)'
+      end
+    end
+    if found then ours.unit, ours.e, ours.how = found, main_e, how end
+  end
+  local said = how .. ' ' .. #all
+  if found ~= diver.unit or said ~= diver.said or w ~= diver.world then
+    if found ~= diver.unit then diver.posture = nil end
+    diver.unit, diver.said, diver.world = found, said, w
+    log('HELLDIVER %s (%d in main world %s)', how, #all, main_e and main_e.n or '-')
+  end
+end
+
+-- ours not known with several Helldivers aboard: the camera, sampled while the ship is the main world
+local function find_ours(now)
+  if ours.unit or #diver.all < 2 or not (main_e and main_e.count > SHIP) then return end
+  local u, how = by_camera(now, diver.all)
+  if u then
+    ours.unit, ours.e, ours.how = u, main_e, how
+    diver.next = 0             -- taken at once
+  end
+end
+
+-- our Helldiver's posture, read every frame; with others aboard, theirs too (logged, numbered as first seen). Ours not
+-- known, a posture every player's Helldiver is in is ours too (joining a lobby whose players are in their hellpods,
+-- every Helldiver plays the stepping-in clip at once).
+local others = { n = 0, label = {}, posture = {}, shared = nil }
+local function watch_anim()
+  local u = diver.unit
+  if u then
+    local p = posture_of(u)
+    diver.now = p
+    if p ~= diver.posture then
+      log('ANIM L%d %s>%s', POSTURE, tostring(diver.posture), tostring(p))
+      diver.posture = p
+    end
+  end
+  if #diver.all < 2 then return end
+  local shared, n = nil, chef.players and chef.players()
+  for i, o in ipairs(diver.all) do
+    if o ~= u then
+      local p = posture_of(o)
+      if p ~= others.posture[o] then
+        if not others.label[o] then others.n = others.n + 1; others.label[o] = others.n end
+        log('ANIM other %d L%d %s>%s', others.label[o], POSTURE, tostring(others.posture[o]), tostring(p))
+        others.posture[o] = p
+      end
+      if i == 1 then shared = p elseif p ~= shared then shared = nil end
+    end
+  end
+  if u or #diver.all ~= n then shared = nil end
+  if shared ~= others.shared then
+    others.shared = shared
+    if shared then log('ANIM all %d Helldivers L%d %s', n, POSTURE, tostring(shared)) end
+  end
+  if shared then diver.now = shared end
+end
+
+-- the Helldiver's posture state this frame (nil when it wasn't read this frame)
+local function posture() return diver.now end
+
+-- every player's Helldiver is aboard and in its hellpod (ours too)
+local function all_in_pods()
+  local n = chef.players and chef.players()
+  if posture() ~= POD_IN or #diver.all ~= n then return false end
+  for _, o in ipairs(diver.all) do
+    if o ~= diver.unit and others.posture[o] ~= POD_IN then return false end
+  end
+  return true
+end
+
+-- where the main world's first camera is
+local function main_cam_at()
+  local r = main_e and main_e.cams[1]
+  if not r or r.dead or not Unit.alive(r.unit) then return nil end
+  local c = Unit.camera(r.unit, 1)
+  if not c then return nil end
+  return Vector3.to_elements(Camera.world_position(c))
+end
+
+-- While ours is in the hellpod on the ship, the clicks. With other players aboard, a click picks the drop point and the
+-- zoom waits for every player's Helldiver in its hellpod (the camera moves into the loadout view 1 s after the last one
+-- is in); `picked` holds the click, `zoomed` says the zoom went by, until ours leaves the pod or the camera is back on
+-- the map from the loadout view (`map` its spot as the zoom began, `away` once it left it): a new pick then (`again`,
+-- alone too; left alone it plays 1.2 s from the click to the camera's move, then 0.9 s).
+local pod = { picked = false, zoomed = false, map = nil, away = false, again = false }
+
+local function watch_pod(click)
+  if posture() ~= POD_IN or not (main_e and main_e.count > SHIP) then
+    pod.picked, pod.zoomed, pod.map, pod.away, pod.again = false, false, nil, false, false
+    return
+  end
+  if pod.zoomed and pod.map then
+    local x, y, z = main_cam_at()
+    local d = x and dist(x, y, z, pod.map[1], pod.map[2], pod.map[3])
+    if d and d >= VIEW_AWAY then pod.away = true
+    elseif d and pod.away and d < MAP_BACK then
+      pod.picked, pod.zoomed, pod.away, pod.again = false, false, false, true
+      log('drop zoom: the camera is back on the drop location map')
+    end
+  end
+  if click and other_players() then pod.picked = true end
+end
+
+-- ------------------------------------------------------------------ speed
+local rate, jumping, asked, broken = 1, false, 0, false
+local rate_by = nil          -- the mode of the scene that set the rate
+local function set_rate(r, why, mode)
+  if broken then return end
+  first('Application.set_time_step_policy')
+  local ok, err = chef.call('Application.set_time_step_policy', 'external_multiplier', r)
+  if ok == nil and err then
+    broken = true
+    log('RATE x%d failed: %s (no more speed changes)', r, tostring(err))
+    return
+  end
+  rate = r
+  log('RATE x%d (%s)', r, why)
+  -- a notice for Fast only (its x8, and the x1 after it); Instant goes by without one
+  if mode == FAST_MODE or (mode == nil and rate_by == FAST_MODE) then say('TIME X' .. r) end
+  rate_by = mode
+end
+
+-- the clock jumps JUMP seconds in the next frame's step
+local function ask_jump()
+  if broken then return end
+  first('Application.set_time_step_policy (jump)')
+  local ok, err = chef.call('Application.set_time_step_policy', 'jump', JUMP)
+  if ok == nil and err then
+    broken = true
+    log('JUMP failed: %s (no more speed changes)', tostring(err))
+    return
+  end
+  asked = JUMP
+end
+
+-- { name, world (the destroyer's entry), real (when it started), t (game s since it started, jumps in), paced (the
+--   same, paced), jumped and jumps (the jumps' seconds and count), left (the part's jump seconds left), from (t when
+--   the part began, for the cap), steps (its first steps' lengths), capped, spent (the part's jumps are over), walk
+--   (paced s since the ship loaded: the walk to the bridge, the log-in intro's second part) and narrowed (its camera
+--   was narrow) for the log-in intro, out_frames (frames of the walk-out) for the cryo pod, in_pod (the clip is over)
+--   for the hellpod entry, loaded (the next ship is there) for a lobby change, by_cam (it ends by the camera: other players aboard, or a pick again), cam (where
+--   the main camera was as it began) and page (t when the loadout page opened, or the camera moved) for the drop zoom }
+local scene = nil
+local block_until = -1       -- the return from a mission: no outside shot sped up until then
+local mission_end, return_shot = nil, false   -- (return_shot: its outside shot was seen)
+local note_said = nil
+local session_said = nil     -- host or client, and the players (a SESSION line when it changes)
+
+-- the small world holding the destroyer's cannons, if one does (the smallest, should a world still loading hold some)
+local function destroyer()
+  local best = nil
+  for _, e in ipairs(worlds) do
+    if e.cannons and e.count <= SMALL and (not best or e.count < best.count) then best = e end
+  end
+  return best
+end
+
+-- a small world besides the main one shows a Helldiver: the loadout screen (the player is in the hellpod)
+local function loadout()
+  for _, e in ipairs(worlds) do
+    if e ~= main_e and e.diver and e.count <= SMALL then return true end
+  end
+  return false
+end
+
+-- the loadout screen's world (small, with its floor of planes); its `diver` is up once the loadout page shows
+local function loadout_world()
+  for _, e in ipairs(worlds) do
+    if e ~= main_e and e.count <= SMALL and e.kinds[MAP_KIND] then return e end
+  end
+end
+
+-- what a scene going on needs to know this frame
+local function progress(dt, paced, landed, now_real)
+  if not scene then return end
+  scene.t = scene.t + dt
+  scene.paced = scene.paced + paced
+  if landed > 0 then
+    scene.jumped, scene.jumps, scene.left = scene.jumped + landed, scene.jumps + 1, scene.left - landed
+  end
+  if #scene.steps < 4 then scene.steps[#scene.steps + 1] = fmt('%.3f', dt) end
+  if scene.name == 'log-in intro' then
+    local cam = ship_cam()
+    if cam then
+      if not scene.walk then
+        -- the walk to the bridge: its own jumps and cap (the outside shot may have spent its own waiting for the ship)
+        log('SCENE log-in intro: the ship is there %.2f s real after it began (%.1f s of game time, %.1f s jumped)',
+          now_real - scene.real, scene.t, scene.jumped)
+        scene.walk, scene.left, scene.from, scene.spent, scene.capped = 0, JUMP_MOST.walk, scene.t, nil, nil
+      end
+      scene.walk = scene.walk + paced
+      if cam.fov <= WIDE_FOV then scene.narrowed = true end
+    end
+  elseif scene.name == 'cryo pod' and posture() == CRYO_OUT then
+    scene.out_frames = (scene.out_frames or 0) + 1
+    if scene.out_frames == 1 then
+      -- the walk-out: its own jumps and cap (the wait in the pod may have spent its own)
+      log('cryo pod: the walk-out after %.1f s of game time (%.1f s jumped), %.2f s real; %d frames at x%d first',
+        scene.t, scene.jumped, now_real - scene.real, PLACE_FRAMES, FAST)
+      scene.left, scene.from, scene.spent, scene.capped = JUMP_MOST['walk-out'], scene.t, nil, nil
+    end
+  elseif scene.name == 'hellpod entry' and posture() == POD_IN and not scene.in_pod then
+    -- the camera's close-up on the pod after the clip: its own jumps
+    scene.in_pod = true
+    local cam = ship_cam()
+    log('hellpod entry: in the hellpod after %.1f s of game time (%.1f s jumped), %.2f s real; camera fov %s',
+      scene.t, scene.jumped, now_real - scene.real, cam and fmt('%.3f', cam.fov) or '-')
+    scene.left, scene.from, scene.spent, scene.capped = JUMP_MOST['pod view'], scene.t, nil, nil
+  elseif scene.name == 'lobby change' and not scene.loaded and listed(scene.world)
+      and ship_reloaded_since(scene.world.cannons_at) then
+    -- the next ship is there: what is left has jumps of its own (the wait for it may have spent the first)
+    scene.loaded = true
+    log('lobby change: the next ship is there %.2f s real after it began (%.1f s of game time, %.1f s jumped)',
+      now_real - scene.real, scene.t, scene.jumped)
+    scene.left, scene.from, scene.spent, scene.capped = JUMP_MOST['lobby change'], scene.t, nil, nil
+  elseif scene.name == 'drop zoom' and not scene.page then
+    if scene.by_cam then
+      -- with others, or a pick again: the camera starts its move into the loadout view
+      local x, y, z = main_cam_at()
+      if x and scene.cam and dist(x, y, z, scene.cam[1], scene.cam[2], scene.cam[3]) >= CAM_MOVE then
+        scene.page, pod.zoomed, pod.map, pod.again = scene.t, true, scene.cam, false
+        log('drop zoom: the camera moves into the loadout view %.2f s of game time after every Helldiver was in its '
+          .. 'hellpod (%.2f s paced)', scene.t, scene.paced)
+      end
     else
-        broken = broken + 1
-        lines[#lines + 1] = 'Galactic map quick exit: NOT AVAILABLE, the map works as normal (' .. tostring(map.why) .. ')'
+      local lw = loadout_world()
+      if lw and lw.diver then
+        scene.page, pod.zoomed, pod.map = scene.t, true, scene.cam
+        log('drop zoom: the loadout page opened %.2f s of game time after the click (%.2f s paced)', scene.t,
+          scene.paced)
+      end
     end
-    local verdict
-    if broken > 0 then
-        verdict = 'PARTIAL - ' .. broken .. ' selected feature(s) not available after a game update; those work as normal'
-    elseif working > 0 then
-        verdict = 'OK - ' .. working .. ' feature(s) active'
+  end
+end
+
+-- The scene to speed up now (and the destroyer's world when it starts one), or nil and why not.
+local function pick(mission, now, click)
+  if mission then return nil, 'a mission' end
+  if scene and scene.name == 'log-in intro' then
+    local cam = ship_cam()
+    if not cam then         -- still outside: the destroyer's world keeps it going
+      if not listed(scene.world) or scene.world.count <= 1 then return nil, "the destroyer's world emptied" end
+      return scene.name
+    end
+    -- the walk to the bridge: its camera narrows, then widens again as the player gets control (it is wide for a
+    -- frame or so as the ship loads)
+    if not scene.narrowed then
+      if (scene.walk or 0) > WALK_WAIT then return nil, 'no walk to the bridge' end
+    elseif cam.fov > WIDE_FOV then return nil, 'the camera went wide' end
+    return scene.name
+  end
+  if scene and scene.name == 'cryo pod' then
+    if posture() == CRYO_IN or posture() == CRYO_OUT then return scene.name end
+    return nil, 'the Helldiver is out of the cryo pod'
+  end
+  if scene and scene.name == 'hellpod entry' then
+    if posture() == POD_ENTER then return scene.name end
+    -- in the pod, a client's camera holds its close-up a while before it pulls out to the drop location map
+    local cam = ship_cam()
+    if posture() == POD_IN and cam and cam.fov < MAP_FOV and scene.t - scene.from < POD_VIEW then
+      return scene.name
+    end
+    return nil, 'the Helldiver is in the hellpod'
+  end
+  if scene and scene.name == 'drop zoom' then
+    if scene.page then
+      if scene.t - scene.page < ZOOM_MOVE then return scene.name end
+      return nil, 'the loadout view is up'
+    end
+    if scene.paced < ZOOM_RAMP then return scene.name end
+    pod.picked = false         -- (with others: that click picked nothing; the next one may)
+    return nil, 'no loadout page after the click'
+  end
+  local ship = main_e ~= nil and main_e.count > SHIP
+  if ship and posture() == POD_ENTER then return 'hellpod entry' end
+  if ship and (posture() == CRYO_IN or posture() == CRYO_OUT) then return 'cryo pod' end
+  if ship and click and posture() == POD_IN and not other_players() then
+    local lw = loadout_world()
+    if lw and not lw.diver then return 'drop zoom' end
+    if pod.again then return 'drop zoom' end   -- (the loadout page's Helldiver stays as the camera goes back)
+  end
+  -- With other players the zoom waits for every player's Helldiver in its hellpod, after a click (the host's clicks
+  -- would jump the clock while it waits). Only the host's: a client's zoom follows the host's, synced.
+  if ship and pod.picked and not pod.zoomed and chef.is_host and chef.is_host() == true and all_in_pods() then
+    return 'drop zoom'
+  end
+  local d = destroyer()
+  if not d then return nil, scene and "the destroyer's cannons went" end
+  if d.kinds[LAUNCH_KIND] then return nil, 'the hellpod launch' end
+  if not ship_seen then
+    if d == main_e then return 'log-in intro', nil, d end
+    return nil, 'an outside shot with no ship loaded'
+  end
+  if loadout() then return nil, 'the hellpod launch (the loadout screen is up)' end
+  if now < block_until then return nil, 'after a mission' end
+  -- The FTL's outside world is big as it starts, and may be the main one (as a client); an FTL goes on
+  -- while its world holds the cannons (joining a lobby elsewhere, it shrinks for the arrival). A small one
+  -- is a lobby change (joining or leaving) as it begins over our loaded ship, the main world (joining from the galactic
+  -- map), as our old ship empties (the same frame, or 0.3 s after) unless ours was last
+  -- seen in its hellpod (the launch: its ship empties a second before its cannons), and once a ship loaded under it
+  -- (the main world may swap between the two meanwhile); else the launch.
+  if d.count >= FTL_UNITS or (scene and scene.name == 'FTL' and scene.world == d) then return 'FTL', nil, d end
+  if ship_reloaded_since(d.cannons_at) then return 'lobby change', nil, d end
+  if main_e and main_e.count > SHIP and main_e.loaded_at and d.cannons_at and main_e.loaded_at < d.cannons_at then
+    return 'lobby change', nil, d
+  end
+  if ship_emptied_since(d.cannons_at) and diver.last ~= POD_IN then return 'lobby change', nil, d end
+  return nil, 'a small outside shot (the launch?)'
+end
+
+local function apply(dt, now, mission, click, paced, landed)
+  progress(dt, paced, landed, now)
+  local name, note, d = pick(mission, now, click)
+  if name and mode_of(name) == OFF then name, note, d = nil, ROW_OF[name].label .. ' is Off', nil end
+  local ended = false
+  if scene and name ~= scene.name then
+    log('SCENE %s over (%s): %.1f s of game time%s, %.1f s real%s; first steps %s', scene.name, note or '?', scene.t,
+      scene.jumps > 0 and fmt(' (%.1f s of it in %d jumps)', scene.jumped, scene.jumps) or '', now - scene.real,
+      scene.capped and ', capped' or '', table.concat(scene.steps, ' '))
+    scene, ended = nil, true
+  end
+  if name and not scene then
+    scene = { name = name, world = d, real = now, t = 0, paced = 0, jumped = 0, jumps = 0, left = JUMP_MOST[name],
+              from = 0, steps = {} }
+    if name == 'drop zoom' then scene.by_cam, scene.cam = other_players() or pod.again, { main_cam_at() } end
+    log('SCENE %s starts (%s; %s; %s)', name, MODE_NAMES[mode_of(name)],
+      d and fmt('destroyer world %d, %d units', d.n, d.count) or 'posture ' .. tostring(posture()), session_said or '?')
+  end
+  if scene and not scene.capped and scene.t - scene.from >= CAP then
+    scene.capped = true
+    log('SCENE %s: %d s of game time, x1 until it ends', scene.name, CAP)
+  end
+  if note ~= note_said then
+    note_said = note
+    if note and not ended then log('x1: %s', note) end
+  end
+  local mode = scene and not scene.capped and mode_of(scene.name) or nil
+  -- (the cryo pod's walk-out holds its first frames at x8)
+  local hold = scene and scene.out_frames and scene.out_frames <= PLACE_FRAMES
+  local jump = mode == INSTANT and scene.left > 0 and not hold
+  if mode == INSTANT and scene.left <= 0 and not scene.spent then
+    scene.spent = true
+    log('SCENE %s: %.1f s jumped, x%d for the rest', scene.name, scene.jumped, FAST)
+  end
+  local want = mode and (jump and 1 or FAST) or 1
+  local why = scene and scene.name or note or 'no scene'
+  if want ~= rate then set_rate(want, why, mode) end
+  if jump ~= jumping then
+    jumping = jump
+    log('JUMPS %s (%s)', jump and fmt('of %d s a frame', JUMP) or 'off', why)
+  end
+  if jump then ask_jump() end
+end
+
+-- ------------------------------------------------------------------ frame
+local next_session, was_host = 0, nil
+local was_mission, mouse_was = false, false
+
+function M.update(dt)
+  local now = clock()
+  dt = type(dt) == 'number' and dt or 0
+  -- the jump asked last frame is in this step; the rest is paced (the step x8 would have made)
+  local landed = (asked > 0 and dt >= asked) and asked or 0
+  asked = 0
+  local paced = min((dt - landed) * FAST / rate, STEP_MOST)
+  diver.now = nil
+  local down = chef.mouse_down and chef.mouse_down('left') == true
+  local click = down and not mouse_was
+  mouse_was = down
+
+  local mission = chef.in_mission() == true
+  if mission ~= was_mission then
+    was_mission = mission
+    log('in mission: %s', tostring(mission))
+    if mission then
+      forget_ours('a mission')
+      diver.last = nil
     else
-        verdict = 'IDLE - every feature is set to Off'
+      block_until, mission_end, return_shot = now + AFTER_MISSION, now, false
     end
-    table.insert(lines, 1, verdict)
-    table.insert(lines, 2, 'Impatient Diver ' .. M.version)
-    table.insert(lines, 3, state.menu and 'Settings: Mod Options Menu (escape menu > MODS > Impatient Diver)'
-                           or 'Settings: defaults, every skip on, speed boost off (Mod Options Menu not found)')
-    if code and #code.moved > 0 then
-        lines[#lines + 1] = 'Signatures were searched for (game updated since build 25480438).'
+  end
+  if now >= next_session then
+    next_session = now + SESSION_SECONDS
+    local host = chef.is_host and chef.is_host()
+    if host == false and was_host == true then
+      joined_at = now
+      log('SESSION joined another\'s')
     end
-    write_status(lines)
-    note(verdict)
+    was_host = host
+    local s = fmt('%s, %s players', host == true and 'host' or host == false and 'not host' or '?',
+      tostring(chef.players and chef.players()))
+    if s ~= session_said then
+      session_said = s
+      log('SESSION %s', s)
+    end
+  end
+
+  if not mission then
+    watch_worlds(now)
+    if not ship_seen and main_e and main_e.count > SHIP then
+      ship_seen = true
+      log('ship loaded (world %d, %d units)', main_e.n, main_e.count)
+    end
+    if now >= next_scan then
+      next_scan = now + SCAN_SECONDS
+      scan()
+    end
+    -- the return from a mission is over once its outside shot is (the ship loads again under it, about 50 s after
+    -- the mission); a return with none waits for the 90 s
+    if now < block_until then
+      if destroyer() then return_shot = true
+      elseif return_shot and main_e and main_e.count > SHIP and main_e.loaded_at and main_e.loaded_at >= mission_end then
+        block_until = -1
+        log('the return from the mission is over (%.1f s after it ended)', now - mission_end)
+      end
+    end
+    watch_cam()
+    find_ours(now)
+    if now >= diver.next or diver.world ~= (main_e and main_e.world) or (ours.e and ours.e.count <= SHIP) then
+      look_up_diver(now)
+    end
+    watch_anim()
+    if diver.now ~= nil then diver.last = diver.now end
+    watch_pod(click)
+  end
+  apply(dt, now, mission, click, paced, landed)
+
 end
 
--- Decides, per feature and scene, what is usable, and writes the status file.
-local function finish_resolution()
-    derive()
-    local ids = derived.scene_ids
-    local core = derived.manager and ids and V.current
-    for _, feature in ipairs(FEATURES) do
-        local usable, why = core, core and '' or 'cutscene system not found'
-        if usable and not (derived.clock and V.clock_now) then usable, why = false, 'scene clock not found' end
-        local scenes = {}
-        if feature.id == 'hellpod' then
-            usable, why, scenes = hellpod_usable()
-            scenes = scenes or {}
-        elseif feature.id == 'zoom' then
-            usable, why, scenes = zoom_usable()
-            scenes = scenes or {}
-        elseif feature.id == 'shipspeed' then
-            usable, why, scenes = speed_usable()
-            scenes = scenes or {}
-        elseif feature.id == 'intro' then
-            usable, why, scenes = intro_usable()
-            scenes = scenes or {}
-        elseif usable then
-            for _, scene in ipairs(feature.scenes) do
-                local id = ids[scene]
-                local ok = id ~= nil
-                if ok then
-                    local plan = {}
-                    for phase, step in pairs(WARP_PLANS[scene]) do
-                        local entry = {hold_frames = step.hold_frames}
-                        if step.sig then
-                            entry.stamp, entry.wait = V[step.sig .. '_stamp'], V[step.sig .. '_wait']
-                            if not code.found[step.sig] or not entry.stamp or not entry.wait then ok = false; break end
-                        end
-                        plan[phase] = entry
-                    end
-                    if ok then state.plans[id] = plan end
-                end
-                if ok then
-                    state.scene_feature[id] = {feature = feature, name = scene}
-                    scenes[#scenes + 1] = scene
-                end
-            end
-            if #scenes == 0 then usable, why = false, 'its scenes were not found' end
-        end
-        if not usable then
-            for _, scene in ipairs(feature.scenes) do
-                local id = ids and ids[scene]
-                if id then state.scene_feature[id], state.plans[id] = nil, nil end
-            end
-        end
-        feature.usable, feature.why, feature.found = usable and true or false, why, scenes
-        note(feature.label .. ': ' .. (usable and table.concat(scenes, ', ') or 'not available (' .. why .. ')'))
-    end
-    state.map.usable, state.map.why = map_usable()
-    note('Galactic map quick exit: ' .. (state.map.usable and ('available, chat check ' .. (state.map.chat and 'on' or 'off'))
-                                         or ('not available (' .. state.map.why .. ')')))
-    for _, line in ipairs(code:missing_list()) do note('Signature ' .. line) end
-    for _, line in ipairs(code.problems) do note('Signature problem: ' .. line) end
-    state.fader = derived.fader
-    state.names = {}
-    for name, id in pairs(ids or {}) do state.names[id] = name end
-    state.ready = true
-    report()
+-- Switched off in the F9 menu, or stopped after errors: the game's clock goes back. With this the loader stops the mod
+-- instead of pausing it, and a new copy starts when it's switched on again.
+function M.on_stop()
+  if rate ~= 1 then set_rate(1, 'stopped') end
 end
 
----------------------------------------------------------------------------------------
--- Scene state
-
-local function manager()
-    return derived.manager and pointer(read(native.base + derived.manager, 8))
+function M.shutdown()
+  if rate ~= 1 then set_rate(1, 'shutdown') end
 end
 
--- current scene id and phase, or nil
-local function scene_now(mgr)
-    local current = mgr and u32(read(mgr + V.current, 4))
-    if not current or current > SCENE.max_id then return nil end
-    local phase = current ~= 0 and u32(read(mgr + SCENE.context, 4)) or 0
-    if not phase or phase > SCENE.max_phase then return nil end
-    return current, phase
-end
+local modes = {}
+for i, row in ipairs(ROWS) do modes[i] = row.label .. ' ' .. MODE_NAMES[mode_of(row.scene)] end
+log('Impatient Diver V%s on Chef Shared Loader %s (api %s), engine build %s %s, %.2f s after launch; %s%s', M.version,
+  tostring(chef.loader_version), tostring(chef.api), tostring(Application.build and Application.build()),
+  tostring(Application.build_identifier and Application.build_identifier()), clock(), table.concat(modes, ', '),
+  menu and '' or ' (no F9 menu: defaults)')
 
-local function clock_now()
-    local clock = derived.clock and pointer(read(native.base + derived.clock, 8))
-    local now = clock and u64(read(clock + V.clock_now, 8))
-    if now and now ~= 0 then return now end
-end
-
--- The presenter manager (UI state + presenters), or nil.
-local function presenter_manager()
-    local ui = V.ui and pointer(read(native.base + V.ui, 8))
-    return ui and ui + V.presenters
-end
-
-local function hold_fade_clear()
-    local base = state.fader and pointer(read(native.base + state.fader, 8))
-    local fader = base and base + V.fader_offset
-    local alpha, target = fader and u32(read(fader + V.fader_alpha, 4)), fader and u32(read(fader + V.fader_target, 4))
-    if not alpha or not target or (alpha == 0 and target == 0) then return end
-    local _ = write(fader + V.fader_duration, ZERO32) and write(fader + V.fader_alpha, ZERO32)
-              and write(fader + V.fader_start, ZERO32) and write(fader + V.fader_target, ZERO32)
-end
-
----------------------------------------------------------------------------------------
--- Skips
-
-local run = {warp = nil, scene = nil, since = 0}
-
--- Fast-forward: each frame, moves the timed phase's stamp back so the game's own update sees the wait as
--- over. Follows the scene chain; stops when an unskippable scene starts, when a phase with a step doesn't move on in
--- time, or if a timer looks wrong. Phases without a step (loading, other players) are left to the game. by_key:
--- started by a key press (then Manual scenes are followed too).
-local function warp_step(mgr, current, phase)
-    local w = run.warp
-    local function stop(why) note('Fast-forward ' .. why); run.warp = nil end
-    if current == 0 then
-        w.idle_since = w.idle_since or M.time
-        if M.time > w.idle_since + CHAIN then stop('ended') end
-        return
-    end
-    local owner = state.scene_feature[current]
-    local plan = state.plans[current]
-    local mode = owner and owner.feature.mode
-    if not plan or not owner or mode == 'off' or (mode ~= 'auto' and not w.by_key) then return stop('ended') end
-    w.idle_since = nil
-    if current ~= w.scene or phase ~= w.phase then
-        if current ~= w.scene then note('Fast-forwarding ' .. owner.name) end
-        w.scene, w.phase, w.since = current, phase, M.frames
-        w.deadline = M.time + TIMEOUT
-    end
-    if FADE_SCENES[owner.name] then hold_fade_clear() end
-    local step = plan[phase]
-    if not step then return end
-    if step.hold_frames and M.frames < w.since + step.hold_frames then return end
-    if step.stamp then
-        local now = clock_now()
-        local address = mgr + SCENE.context + step.stamp
-        local stamp = u64(read(address, 8))
-        if not now or not stamp then return stop('stopped: timer unreadable') end
-        if stamp > now then return stop('stopped: timer ahead of the clock') end
-        if now - stamp >= step.wait then
-            -- The wait is over: the phase now waits on loading or other players, which is never cut short.
-            w.deadline = M.time + TIMEOUT
-            return
-        end
-        if M.time > w.deadline then return stop('timed out (' .. owner.name .. ' phase ' .. phase .. ')') end
-        if not write(address, ffi.string(ffi.new('uint64_t[1]', now - step.wait), 8)) then
-            return stop('stopped: write failed')
-        end
-        -- due now; the game changes phase itself
-    end
-end
-
----------------------------------------------------------------------------------------
--- Keys: spacebar for the skips (raw keyboard, plus an optional Mod Bindings Menu binding), Escape for the map (plus
--- an optional binding). Neither binding asks for a backend, so Mod Bindings Menu gives each a native action (MODS
--- tab) while one of its 36 is free, else (v2.3+) an extended binding (MORE MODS tab). No default key.
-
--- pending: until when (game time) an unused skip press still counts.
-local key = {space = nil, space_down = false, menu = nil, menu_down = false, registered = false, wanted = false,
-             pending = nil, escape = nil, escape_down = false, map_registered = false, map_down = false}
-
--- Whether a Stingray keyboard button went down this frame (`field` keeps its id and state in `key`).
-local function keyboard_edge(id_field, down_field)
-    local keyboard = S and S.Keyboard
-    if not (keyboard and type(keyboard.pressed) == 'function' and key[id_field]) then return false end
-    local ok, down = pcall(keyboard.pressed, key[id_field])
-    down = ok and down and true or false
-    local edge = down and not key[down_field]
-    key[down_field] = down
-    return edge
-end
-
--- Whether the skip key went down this frame. Called every frame whatever the modes, so the Mod Bindings Menu binding is
--- registered every session (the menu only lists registered bindings; an older one may give an unregistered one's
--- native action, with its key, to another mod).
-local function poll_key()
-    local pressed = false
-    local keyboard = S and S.Keyboard
-    if key.space == nil then
-        local ok, id = false, nil
-        if keyboard and type(keyboard.button_id) == 'function' then ok, id = pcall(keyboard.button_id, 'space') end
-        key.space = ok and id or false
-    end
-    if keyboard_edge('space', 'space_down') then pressed = true end
-    local menu = rawget(_G, 'ModBindingsMenu')
-    if menu and menu.api == 1 then
-        if not key.registered then
-            key.registered = true
-            local ok, res = pcall(menu.register_binding, BINDING, host_text(menu, 3, 'binding.skip', 64), nil,
-                                  {category = host_text(menu, 3, 'option.mod', 64)})
-            note('Mod Bindings Menu binding: ' .. ((ok and res) and 'registered' or 'not registered'))
-        end
-        local ok, down = pcall(menu.is_down, BINDING)
-        down = ok and down and true or false
-        if down and not key.menu_down then pressed = true end
-        key.menu_down = down
-    end
-    return pressed
-end
-
--- Escape: the engine's keyboard buttons (each name it knows), else the Windows key state while the game has focus.
--- Whether it is down.
-local win = nil
-local function escape_down()
-    local keyboard = S and S.Keyboard
-    if key.escape == nil then
-        key.escape = false
-        local ids, names = {}, {}
-        if keyboard and type(keyboard.button_id) == 'function' then
-            for _, name in ipairs(ESCAPE_NAMES) do
-                local ok, id = pcall(keyboard.button_id, name)
-                if ok and id then ids[#ids + 1], names[#names + 1] = id, '"' .. name .. '"' end
-            end
-        end
-        if #ids > 0 then
-            key.escape = ids
-            note('Map key: engine buttons ' .. table.concat(names, ', '))
-        else
-            note('Map key: Windows key state (Escape)')
-        end
-    end
-    if key.escape then
-        for _, id in ipairs(key.escape) do
-            local ok, down = pcall(keyboard.pressed, id)
-            if ok and down then return true end
-        end
-        return false
-    end
-    if win == nil then
-        win = false
-        pcall(function()
-            for _, decl in ipairs({'short imd_GetAsyncKeyState(int key) __asm__("GetAsyncKeyState");',
-                                   'void *imd_GetForegroundWindow(void) __asm__("GetForegroundWindow");',
-                                   'unsigned int imd_GetWindowThreadProcessId(void *window, unsigned int *process) '
-                                       .. '__asm__("GetWindowThreadProcessId");'}) do pcall(ffi.cdef, decl) end
-            win = {user32 = ffi.load('user32'), pid = ffi.new('unsigned int[1]')}
-            win.own = tonumber(native.k32.imd_GetCurrentProcessId())
-        end)
-    end
-    if not win then return false end
-    local window = win.user32.imd_GetForegroundWindow()
-    local focused = window ~= nil and (win.user32.imd_GetWindowThreadProcessId(window, win.pid) or true)
-                    and tonumber(win.pid[0]) == win.own
-    return focused and win.user32.imd_GetAsyncKeyState(VK_ESCAPE) < 0 or false
-end
-
-local function escape_pressed()
-    local down = escape_down()
-    local edge = down and not key.escape_down
-    key.escape_down = down
-    return edge
-end
-
--- The Mod Bindings Menu key that closes the galactic map (registered once that mod is there, whatever the skip modes):
--- whether it went down this frame.
-local function map_binding_pressed()
-    local menu = rawget(_G, 'ModBindingsMenu')
-    if not (menu and menu.api == 1) then return false end
-    if not key.map_registered then
-        key.map_registered = true
-        local ok, res = pcall(menu.register_binding, MAP_BINDING, host_text(menu, 3, 'binding.map', 64), nil,
-                              {category = host_text(menu, 3, 'option.mod', 64)})
-        note('Mod Bindings Menu map binding: ' .. ((ok and res) and 'registered' or 'not registered'))
-    end
-    local ok, down = pcall(menu.is_down, MAP_BINDING)
-    down = ok and down and true or false
-    local edge = down and not key.map_down
-    key.map_down = down
-    return edge
-end
-
----------------------------------------------------------------------------------------
--- Galactic Map Quick Exit
-
--- Whether the chat's text input is open (the HUD's chat widget's byte); false when that can't be read.
-local function typing()
-    if not state.map.chat then return false end
-    local hud = pointer(read(native.base + V.hud, 8))
-    return hud ~= nil and (byte_at(hud + V.chat_hud + V.chat_open) or 0) ~= 0
-end
-
-local function map_step()
-    local map = state.map
-    -- The binding is registered (and its state followed) every frame, so a press made before the map opens is seen
-    -- as held, not as a new press.
-    local binding = map_binding_pressed()
-    if not map.usable then return end
-    if not map.open and M.frames % MAP_IDLE ~= 0 then return end
-    local mgr = presenter_manager()
-    local current = mgr and u32(read(mgr + V.current_presenter, 4))
-    if current ~= HOLOGRAM then
-        if map.open then map.open = false; note('Galactic map closed') end
-        key.escape_down = false
-        return
-    end
-    if not map.open then
-        map.open = true
-        escape_pressed()  -- an Escape held as the map opens doesn't count
-        note('Galactic map open')
-        return
-    end
-    -- Escape is followed while the option is Off too, so turning it On with Escape held is not a press.
-    local escape = escape_pressed() and map.escape
-    if not (escape or binding) then return end
-    -- Typing in the chat on the map (Escape closing the chat, or a letter bound to the map key) is not a request.
-    if typing() then
-        note((escape and 'Escape' or 'Map binding') .. ' on the galactic map ignored: the chat is open')
-        return
-    end
-    -- The Hologram presenter's close request, as the presenter manager's update reads it: the game closes the map
-    -- (and pops its screen) itself. The object is read fresh: it only exists while the map is open.
-    local request = pointer(read(mgr + V.collection + V.holo_slot, 8))
-    local by = escape and 'Escape' or 'Map binding'
-    if request and write(request + V.close_flag, '\1') then
-        note(by .. ' on the galactic map: close requested')
-    else
-        note(by .. ' on the galactic map: close request unavailable')
-    end
-end
-
----------------------------------------------------------------------------------------
--- Hellpod entry: the seat transition into the hellpod, then the Hellpod briefing's intro wait
-
--- A value in one of the game's hashed maps ({key u32, value u32} buckets, a power-of-two capacity, an empty key and a
--- multiplier; the probe starts at key * multiplier), or nil. object + the offsets read from the code.
-local function lookup(object, at, k)
-    local buckets = pointer(read(object + at.map, 8))
-    local capacity, empty = u32(read(object + at.capacity, 4)), u32(read(object + at.empty, 4))
-    local multiplier = u32(read(object + at.multiplier, 4))
-    if not (buckets and capacity and empty and multiplier) or capacity < 1 or capacity > 0x100000 then return nil end
-    local power = 1
-    while power < capacity do power = power * 2 end
-    if power ~= capacity then return nil end
-    local hash = tonumber(ffi.cast('uint32_t', ffi.new('uint64_t', multiplier) * k))
-    for probe = 0, math.min(capacity, 128) - 1 do
-        local entry = read(buckets + ((hash + probe) % capacity) * 8, 8)
-        local found = u32(entry, 0)
-        if not found or found == empty then return nil end
-        if found == k then return u32(entry, 4) end
-    end
-end
-
--- The local Helldiver's entity id (the player manager's avatar reference, through the game's resolver), or nil.
-local function local_avatar()
-    local players = pointer(read(native.base + V.players, 8))
-    if not players or u32(read(players + V.local_active, 4)) == 0 then return nil end
-    local ref = u32(read(players + V.avatar_ref, 4))
-    if not ref or ref == 0x7fff then return nil end
-    local entities = pointer(read(native.base + V.entities, 8))
-    local index = entities and lookup(entities, {map = V.ent_map, capacity = V.ent_capacity, empty = V.ent_empty,
-                                                 multiplier = V.ent_multiplier}, ref)
-    if not index or index >= 0x1000000 then return nil end
-    local id = u32(read(entities + V.ent_ids * 8 + index * 24, 4))
-    if not id or id == 0 or id == 0xffffffff then return nil end
-    return id
-end
-
--- The seat record of an entity (a Helldiver), or nil.
-local function seat_record(id)
-    local seaters = pointer(read(native.base + V.seaters, 8))
-    local index = seaters and lookup(seaters, {map = V.seat_map, capacity = V.seat_capacity, empty = V.seat_empty,
-                                               multiplier = V.seat_multiplier}, id)
-    if not index or index >= 0x100000 then return nil end
-    local records = pointer(read(seaters + V.seat_records, 8))
-    return records and records + index * HELLPOD.record_size
-end
-
--- A seat record's state: the seat collection (entity id) it is in or entering, whether it is moving, and the
--- current step's deadline (u64 microseconds), or nil.
-local function seat_state(record)
-    local r = read(record, HELLPOD.record_size)
-    if not r then return nil end
-    return {collection = u32(r, 0), moving = r:byte(V.seat_moving + 1) ~= 0, target = i32(r, V.seat_target),
-            deadline = u64(r:sub(V.seat_deadline + 1, V.seat_deadline + 8))}
-end
-
-local function seat_clock()
-    local clock = pointer(read(native.base + V.seat_clock, 8))
-    local now = clock and u64(read(clock + V.seat_clock_now, 8))
-    if now and now ~= 0 then return now end
-end
-
--- Whether an entity id is one of the ship's hellpods (the hellpod manager's count at +8, each entity's id at +8).
-local function is_hellpod(id)
-    local pods = pointer(read(native.base + V.hellpods, 8))
-    local count = pods and u32(read(pods + 8, 4))
-    if not count or count > HELLPOD.max_pods then return false end
-    for i = 0, count - 1 do
-        local pod = pointer(read(pods + V.pod_list + i * 8, 8))
-        if pod and u32(read(pod + 8, 4)) == id then return true end
-    end
-    return false
-end
-
-local function game_state()
-    local game = derived.game and pointer(read(native.base + derived.game, 8))
-    return game and u32(read(game + V.game_state, 4))
-end
-
--- The open Hellpod loadout screen while the Hellpod briefing is the current menu, or nil.
-local function briefing_screen()
-    local pm = presenter_manager()
-    if not pm or u32(read(pm + V.current_presenter, 4)) ~= HELLPOD.briefing then return nil end
-    local stack = pointer(read(native.base + V.screen_stack, 8))
-    if not stack or u32(read(stack, 4)) ~= HELLPOD.screen_type then return nil end
-    return pointer(read(stack + V.screen_slot, 8))
-end
-
--- idle: watching the local seat (every few frames, on the ship only); seat: moving each step's deadline to now until
--- the seat is reached (the game then opens the briefing itself); briefing: waiting for the briefing's intro wait,
--- then expiring its timer.
-local entry = {phase = 'idle', record = nil, resolved = -1e9, collection = nil}
-local hellpod_feature = nil
-
-local function entry_stop(why)
-    note('Hellpod entry: ' .. why)
-    entry.phase = 'idle'
-end
-
-local function hellpod_step()
-    local feature = hellpod_feature
-    if not (feature and feature.usable) or feature.mode == 'off' then entry.phase = 'idle'; return end
-    if entry.phase == 'idle' and M.frames % HELLPOD.idle_every ~= 0 then return end
-    if entry.phase == 'idle' and game_state() ~= HELLPOD.ship_state then
-        entry.collection, entry.record = nil, nil  -- off the ship: forget the seat (it is looked up again on board)
-        return
-    end
-    if not entry.record or M.frames - entry.resolved > 300 then
-        local avatar = local_avatar()
-        entry.record, entry.resolved = avatar and seat_record(avatar), M.frames
-    end
-    local s = entry.record and seat_state(entry.record)
-    if not s then entry.record = nil; return end
-    local previous = entry.collection
-    entry.collection = s.collection
-    if entry.phase == 'idle' then
-        -- An entry: the seat was free and now moves into one of the ship's hellpods.
-        if previous ~= 0 or not s.collection or s.collection == 0 or not s.moving or not is_hellpod(s.collection) then
-            return
-        end
-        entry.pod, entry.since, entry.started, entry.phase = s.collection, M.frames, M.time, 'seat'
-        note('Hellpod entry: skip started (automatic)')
-        return
-    end
-    if entry.phase == 'seat' then
-        if not s.moving or s.collection ~= entry.pod then
-            note(string.format('Hellpod entry: seat reached after %d frames', M.frames - entry.since))
-            entry.phase, entry.since, entry.started = 'briefing', M.frames, M.time
-            if not state.hellpod_intro then entry_stop('done (briefing intro skip unavailable)') end
-            return
-        end
-        if M.time > entry.started + HELLPOD.seat_timeout then return entry_stop('stopped: the seat was not reached in time') end
-        local now = seat_clock()
-        if not now or not s.deadline then return entry_stop('stopped: clock unreadable') end
-        if s.deadline > now then
-            if s.deadline - now > HELLPOD.max_ahead then return entry_stop('stopped: deadline too far ahead') end
-            if not write(entry.record + V.seat_deadline, ffi.string(ffi.new('uint64_t[1]', now), 8)) then
-                return entry_stop('stopped: write failed')
-            end
-        end
-        return
-    end
-    if entry.phase == 'briefing' then
-        if not state.hellpod_intro then return entry_stop('done (briefing intro skip unavailable)') end
-        local screen = briefing_screen()
-        local intro = screen and u32(read(screen + V.intro_phase, 4))
-        if intro == HELLPOD.intro_waiting then
-            if write(screen + V.intro_timer, ZERO32) then
-                entry_stop(string.format('briefing intro skipped (%d frames after the seat)', M.frames - entry.since))
-            else
-                entry_stop('briefing intro: write failed')
-            end
-        elseif M.time > entry.started + HELLPOD.briefing_wait then
-            entry_stop('briefing intro not seen')
-        end
-    end
-end
-
----------------------------------------------------------------------------------------
--- Drop location zoom: the zoom on the map between the pick and the loadout page
-
--- page: the loadout screen's page last seen; skipped: the frame of the last skip.
-local zoom = {page = nil, skipped = nil}
-local zoom_feature = nil
-
--- The value the loadout page waits on while the zoom runs (a pick made, the value short of 1): its address, value
--- and which branch ('progress' with players in the drop group, 'synced' without), or nil.
-local function zoom_running(screen)
-    local target = f32(read(screen + V.zoom_target, 4))
-    local group = pointer(read(native.base + V.zoom_group, 8))
-    local players = group and u32(read(group + V.zoom_players, 4))
-    local progress = group and f32(read(group + V.zoom_progress, 4))
-    local synced = group and f32(read(group + V.zoom_synced, 4))
-    local leads = read(screen + V.zoom_leader, 1)
-    if target ~= 1 or not players then return nil end
-    if players > 0 then
-        if progress and progress >= 0 and progress < 1 then return group + V.zoom_progress, progress, 'progress' end
-    elseif leads and leads:byte() == 0 and synced and synced >= 0 and synced < 1 then
-        return group + V.zoom_synced, synced, 'synced'
-    end
-end
-
--- Follows the loadout screen while the Hellpod briefing is open (looked for every few frames otherwise).
-local function zoom_step()
-    local feature = zoom_feature
-    if not (feature and feature.usable) or feature.mode == 'off' then zoom.page = nil; return end
-    if zoom.page == nil and M.frames % ZOOM.idle_every ~= 0 then return end
-    local screen = briefing_screen()
-    local page = screen and u32(read(screen + V.page, 4))
-    if not page then
-        zoom.page = nil
-        return
-    end
-    if page ~= zoom.page and page == ZOOM.loadout_page and zoom.skipped then
-        note(string.format('Drop location zoom: loadout page %d frames after the skip', M.frames - zoom.skipped))
-        zoom.skipped = nil
-    end
-    zoom.page = page
-    if page ~= ZOOM.map_page then return end
-    local address, value, branch = zoom_running(screen)
-    if not address then return end
-    if write(address, ffi.string(ffi.new('float[1]', 1), 4)) then
-        note(string.format('Drop location zoom: ended at %.2f (%s)', value, branch))
-        zoom.skipped = M.frames
-    else
-        note('Drop location zoom: write failed')
-    end
-end
-
----------------------------------------------------------------------------------------
--- Ship walk speed boost: the speeds in the local Helldiver's private movement record, on the ship only
-
--- entity / address: the record last boosted; base: its bytes before (per field); wrote: the bytes written (per field);
--- failed: a record whose write failed (left alone); noted: the last one-off log line; looked: the frame of the last
--- lookup of the Helldiver.
-local boost = {entity = nil, address = nil, base = nil, wrote = nil, failed = nil, noted = nil, looked = 0}
-local speed_feature = nil
-
--- The local Helldiver's entity id and the address of its private movement record, or nil (no Helldiver, or no copy:
--- it reads the shared record, which the boost never changes).
-local function private_record()
-    local avatar = local_avatar()
-    local avatars = avatar and pointer(read(native.base + V.avatars, 8))
-    local index = avatars and lookup(avatars, {map = V.copy_map, capacity = V.copy_capacity, empty = V.copy_empty,
-                                               multiplier = V.copy_multiplier}, avatar)
-    if not index or index >= SPEED.max_copies then return nil end
-    return avatar, avatars + V.copies + index * SPEED.copy_size
-end
-
--- Each speed field's 4 bytes and value in a record, or nil.
-local function read_speeds(address)
-    local blob = read(address, SPEED.span)
-    if not blob then return nil end
-    local raw, values = {}, {}
-    for _, name in ipairs(SPEED.fields) do
-        raw[name] = blob:sub(V[name] + 1, V[name] + 4)
-        values[name] = f32(raw[name])
-    end
-    return raw, values
-end
-
-local function holds(raw, bytes)
-    for _, name in ipairs(SPEED.fields) do if raw[name] ~= bytes[name] then return false end end
-    return true
-end
-
-local function boost_note(key, msg)
-    if boost.noted == key then return end
-    boost.noted = key
-    note('Ship walk speed boost: ' .. msg)
-end
-
--- Puts the speeds back, only into the local Helldiver's own record (looked up again) and only while it still holds
--- what was written; then forgets the record.
-local function unboost(why)
-    local entity, address = private_record()
-    if boost.wrote and entity == boost.entity and address == boost.address then
-        local raw = read_speeds(address)
-        if raw and holds(raw, boost.wrote) then
-            for _, name in ipairs(SPEED.fields) do write(address + V[name], boost.base[name]) end
-            note('Ship walk speed boost: speeds put back (' .. why .. ')')
-        end
-    end
-    boost.entity, boost.address, boost.base, boost.wrote = nil, nil, nil, nil
-end
-
-local function speed_step()
-    local feature = speed_feature
-    if not (feature and feature.usable) or M.frames % SPEED.every ~= 0 then return end
-    if feature.mode == 'off' then
-        if boost.wrote then unboost('switched off') end
-        return
-    end
-    if game_state() ~= SPEED.ship_state then
-        if boost.wrote then unboost('left the ship') end
-        return
-    end
-    -- While the record boosted still holds the boost, only it is read (the Helldiver is looked up again every
-    -- `lookup_every` frames, or as soon as the record changes: a write always follows a fresh lookup).
-    if boost.wrote and M.frames - boost.looked < SPEED.lookup_every then
-        local raw = read_speeds(boost.address)
-        if raw and holds(raw, boost.wrote) then return end
-    end
-    boost.looked = M.frames
-    local entity, address = private_record()
-    if not entity then return boost_note('none', 'the local Helldiver has no ship movement record yet') end
-    local raw, values = read_speeds(address)
-    if not raw then return end
-    if boost.wrote and entity == boost.entity and address == boost.address and holds(raw, boost.wrote) then return end
-    if boost.failed == address then return end
-    -- A Helldiver new on board, or its record made again (a respawn): its current speeds are the ship's own.
-    local wrote = {}
-    for _, name in ipairs(SPEED.fields) do
-        local v = values[name]
-        if not v or v ~= v or v == math.huge or v == -math.huge then
-            return boost_note('odd', 'the movement record holds a value that is not a speed; left alone')
-        end
-        -- Never slower: a speed at or above the cap, or not above 0, stays as it is.
-        local target = v > 0 and math.max(v, math.min(v * SPEED.factor, SPEED.cap)) or v
-        wrote[name] = ffi.string(ffi.new('float[1]', target), 4)
-    end
-    for _, name in ipairs(SPEED.fields) do
-        if not write(address + V[name], wrote[name]) then
-            for _, back in ipairs(SPEED.fields) do write(address + V[back], raw[back]) end
-            boost.failed = address
-            return boost_note('failed', 'a write failed; the speeds were put back and are left alone')
-        end
-    end
-    boost.entity, boost.address, boost.base, boost.wrote, boost.noted = entity, address, raw, wrote, nil
-    local parts = {}
-    for _, name in ipairs({'speed_walk', 'speed_jog', 'speed_sprint'}) do
-        parts[#parts + 1] = string.format('%s %.2f -> %.2f', name:sub(7), f32(raw[name]), f32(wrote[name]))
-    end
-    note(string.format('Ship walk speed boost: on, entity %d (%s m/s; cap %g)', entity, table.concat(parts, ', '),
-                       SPEED.cap))
-end
-
----------------------------------------------------------------------------------------
--- Intro cinematics: the title screen's own no-intro start
-
--- flag / original: the game's no-intro flag while the mod has it set, and the byte it held; title: the title object
--- handled (until it closes); first: the first title screen has been handled.
-local intro = {flag = nil, original = nil, title = nil, first = false, untouched = false}
-local intro_feature = nil
-
--- The title object while the title screen is up, or nil.
-local function title_object()
-    local states = pointer(read(native.base + V.states, 8))
-    local count = states and u32(read(states + V.title_count, 4))
-    if not count or count == 0 or count > INTRO.max_states then return nil end
-    local blob = read(states + V.title_entries, count * 16)
-    if not blob then return nil end
-    for i = 0, count - 1 do
-        if u32(blob, i * 16 + 8) == V.title_type then return pointer(blob:sub(i * 16 + 1, i * 16 + 8)) end
-    end
-end
-
-local function game_object()
-    return derived.game and pointer(read(native.base + derived.game, 8))
-end
-
--- Puts the game's no-intro flag back, if the mod set it and it still holds the mod's 1.
-local function restore_flag(why)
-    if not intro.flag then return end
-    if byte_at(intro.flag) == 1 and write(intro.flag, intro.original) then
-        note('Intro cinematics: the game\'s no-intro flag put back (' .. why .. ')')
-    end
-    intro.flag, intro.original = nil, nil
-end
-
-local function intro_step()
-    local feature = intro_feature
-    if not (feature and feature.usable) then return end
-    if feature.mode == 'off' then return restore_flag('switched off') end
-    if not state.menu and M.frames < INTRO.menu_wait then return end  -- Mod Options Menu may load after this addon
-    if intro.first and M.frames % INTRO.every ~= 0 then return end
-    local title = title_object()
-    if not title then
-        if intro.title then note('Intro cinematics: title screen closed') end
-        intro.title = nil
-        if intro.first or intro.untouched then return end
-        -- On the ship or in a mission already (the title screen passed before the mod started): nothing to skip.
-        local now_state = game_state()
-        if now_state == SPEED.ship_state or now_state == INTRO.mission_state then
-            intro.first = true
-            note('Intro cinematics: no title screen before game state ' .. now_state .. '; nothing to do')
-            return restore_flag('the game went on without a title screen')
-        end
-        if intro.flag then return end
-        -- Before the first title screen: the game's own no-intro flag, which only the title screen's start reads.
-        local game = game_object()
-        local now = game and read(game + V.intro_flag, 1)
-        if now == '\0' then
-            if write(game + V.intro_flag, '\1') then
-                intro.flag, intro.original = game + V.intro_flag, now
-                note('Intro cinematics: no-intro flag set before the title screen')
-            end
-        elseif now then
-            intro.untouched = true
-            note('Intro cinematics: the game\'s no-intro flag is already set (' .. now:byte() .. '); left alone')
-        end
-        return
-    end
-    if title == intro.title then return end
-    intro.title, intro.first = title, true
-    -- The title screen has started (its start has read the flag).
-    local game = game_object()
-    local other = (game == nil or pointer(read(title, 8)) ~= game) and ' (the title screen holds another game object)'
-                  or ''
-    local no_intro, queued = byte_at(title + V.title_no_intro), byte_at(title + V.title_queued)
-    if not (no_intro and queued) then
-        note('Intro cinematics: title screen unreadable' .. other)
-    elseif no_intro ~= 0 then
-        note('Intro cinematics: the title screen started without them, '
-             .. (intro.flag and 'from the no-intro flag' or 'on its own') .. other)
-    elseif queued == 0 then
-        -- Its start missed the flag: the byte is set now, before the videos are queued (without the start's own
-        -- continue: the title screen waits for a key press as after the videos).
-        local ok = write(title + V.title_no_intro, '\1')
-        note('Intro cinematics: ' .. (ok and 'no-intro set on the title screen' or 'write failed') .. other)
-    else
-        note('Intro cinematics: too late, the videos were already queued' .. other)
-    end
-    restore_flag('the title screen has started')
-end
-
----------------------------------------------------------------------------------------
--- Frame step
-
-local function step()
-    if not state.ready then
-        if code.scan and code:step() then finish_resolution() end
-        return
-    end
-    map_step()
-    local pressed = poll_key()
-    -- The intro and the speed boost undo their own changes when switched off, so they run whatever the modes.
-    intro_step()
-    speed_step()
-    if not state.skips_on and not run.warp then key.pending = nil; return end  -- only the map exit: no scene polling
-    -- A press is kept for a moment, so one made a frame before its scene is seen still counts.
-    if pressed and key.wanted then key.pending = M.time + PRESS_KEEP end
-    if key.pending and M.time > key.pending then key.pending = nil end
-    local press = key.pending ~= nil
-    -- The hellpod entry and the drop location zoom are not cutscene scenes (Off or Automatic only).
-    hellpod_step()
-    zoom_step()
-    local mgr = manager()
-    if not mgr then return end
-    local current, phase = scene_now(mgr)
-    if not current then return end
-
-    if current ~= run.scene then
-        run.scene, run.since = current, M.frames
-        note('Scene ' .. (current == 0 and 'none' or (state.names[current] or tostring(current))))
-    end
-    local owner = current ~= 0 and state.scene_feature[current]
-    local mode = owner and owner.feature.mode
-    if mode == 'key' then run.key_scene = M.time end
-    if mode == 'auto' and not run.warp and run.auto_done ~= run.since then
-        run.auto_done = run.since  -- once per scene instance
-        run.warp = {by_key = false}
-        note('Skip started (automatic)')
-    elseif mode == 'key' and press then
-        key.pending = nil
-        if not run.warp then
-            run.warp = {by_key = true}
-            note('Skip started (key press)')
-        elseif not run.warp.by_key then
-            run.warp.by_key = true  -- an automatic chain reaching a Manual scene carries on with the press
-            note('Skip carried on (key press)')
-        end
-    elseif current == 0 and press and run.key_scene and M.time <= run.key_scene + CHAIN
-           and not (run.warp and run.warp.by_key) then
-        -- Between two scenes of a chain (a loading screen): the press carries into the next selected scene.
-        key.pending = nil
-        if run.warp then run.warp.by_key = true else run.warp = {by_key = true} end
-        note('Skip started (key press between scenes)')
-    end
-    if run.warp then warp_step(mgr, current, phase) end
-end
-
--- Native access and signatures, resolved on the first frame (the map exit is always on).
-local function start()
-    state.started = true
-    local ok, why = init_native()
-    if not ok then
-        write_status({'NOT AVAILABLE - ' .. why .. '; everything works as normal', 'Impatient Diver ' .. M.version})
-        note('Native access unavailable: ' .. why)
-        M.retired = true
-        return
-    end
-    -- The game's Text Language, for this mod's texts and every other mod's (bingus_text's shared registry).
-    local tag, game_code = T.observe(read, native.base)
-    note('Text language: ' .. tostring(T.language()) .. ' (game setting ' .. tostring(game_code or 'unreadable')
-         .. ', tag ' .. tostring(tag) .. ')')
-    -- A scene-name switch only counts if it decodes to the scene names (a decoy switch elsewhere doesn't).
-    code = sigscan.new(SIGS, read, native.base, {
-        names = function(rva) local ids = scene_names(rva); return ids and ids.ship_teleporter_arrival ~= nil end})
-    local all, reason = code:start()
-    if all == nil then
-        write_status({'NOT AVAILABLE - ' .. reason .. '; everything works as normal', 'Impatient Diver ' .. M.version})
-        M.retired = true
-    elseif all then
-        finish_resolution()
-    else
-        note('Searching game.dll for moved code (game updated?)')
-    end
-end
-
----------------------------------------------------------------------------------------
--- Settings: Mod Options Menu, which may load before or after this addon. Without it, each skip takes its default.
-
-for _, feature in ipairs(FEATURES) do
-    feature.modes = feature.modes or MODES
-    feature.default = feature.default or #feature.modes  -- Automatic
-    feature.mode = feature.modes[feature.default]
-    if feature.mode == 'key' then key.wanted = true end
-    if feature.id == 'hellpod' then hellpod_feature = feature end
-    if feature.id == 'zoom' then zoom_feature = feature end
-    if feature.id == 'shipspeed' then speed_feature = feature end
-    if feature.id == 'intro' then intro_feature = feature end
-end
-state.skips_on = true  -- the map exit is always on, so native access always starts
-
-local function modes_changed()
-    key.wanted, state.skips_on = false, false
-    for _, feature in ipairs(FEATURES) do
-        if feature.mode == 'key' then key.wanted = true end
-        if feature.mode ~= 'off' then state.skips_on = true end
-    end
-    report()
-end
-
-local function set_mode(feature, value)  -- true if the mode changed
-    local mode = feature.modes[value] or feature.modes[feature.default]
-    if feature.mode == mode then return false end
-    note(feature.label .. ' set to ' .. MODE_NAMES[mode])
-    feature.mode = mode
-    return true
-end
-
-
-local function connect_menu()
-    local menu = rawget(_G, 'ModOptionsMenu')
-    if type(menu) ~= 'table' or menu.api ~= 1 then return false end
-    state.menu = menu
-    local mod = host_text(menu, 2, 'option.mod', 40)
-    -- OFF is shown in the game's own translation when passed as plain English.
-    local automatic = host_text(menu, 2, 'option.choice.automatic', 48)
-    local choices = {'Off', host_text(menu, 2, 'option.choice.manual', 48), automatic}
-    local quick = {'Off', automatic}
-    local switch = {'Off', 'On'}
-    -- ESC Closes Galactic Map (Off/On, On by default), then the speed boost, then the skips under a gap.
-    local map, esc_id = state.map, OPTION_PREFIX .. 'mapesc'
-    local function set_escape(value)
-        local on = value ~= 1
-        if on == map.escape then return end
-        map.escape = on
-        note('ESC Closes Galactic Map set to ' .. (on and 'On' or 'Off'))
-        report()
-    end
-    local ok, done, why = pcall(menu.register_option, esc_id, {
-        type = 'choice', label = host_text(menu, 2, 'option.mapesc.label', 64), mod = mod, choices = switch,
-        default = 2, description = host_text(menu, 2, 'option.mapesc.description', 400)})
-    if ok and done then
-        pcall(menu.on_change, esc_id, set_escape)
-        local got, value = pcall(menu.get, esc_id)
-        set_escape(got and value)
-    else
-        note('Option ' .. esc_id .. ' not registered: ' .. tostring(ok and why or done))
-    end
-    local order = {}
-    for _, feature in ipairs(FEATURES) do if feature.modes == SWITCH_MODES then order[#order + 1] = feature end end
-    for _, feature in ipairs(FEATURES) do if feature.modes ~= SWITCH_MODES then order[#order + 1] = feature end end
-    for i, feature in ipairs(order) do
-        local id = OPTION_PREFIX .. feature.id
-        ok, done, why = pcall(menu.register_option, id, {
-            type = 'choice', label = host_text(menu, 2, 'option.' .. feature.text .. '.label', 64), mod = mod,
-            choices = feature.modes == QUICK_MODES and quick or feature.modes == SWITCH_MODES and switch or choices,
-            default = feature.default, gap = feature.modes ~= SWITCH_MODES and order[i - 1].modes == SWITCH_MODES,
-            description = host_text(menu, 2, 'option.' .. feature.text .. '.description', 400)})
-        if ok and done then
-            pcall(menu.on_change, id, function(value)
-                if set_mode(feature, value) then modes_changed() end
-            end)
-            local got, value = pcall(menu.get, id)
-            set_mode(feature, got and value)
-        else
-            note('Option ' .. id .. ' not registered: ' .. tostring(ok and why or done))
-        end
-    end
-    note('Mod Options Menu connected (version ' .. tostring(menu.version or 1) .. ')')
-    return true
-end
-
----------------------------------------------------------------------------------------
--- Frame hook
-
-local function frame(dt)
-    M.frames = M.frames + 1
-    -- Game time: a long frame (a loading hitch) counts at most one second, so waits only get longer.
-    dt = tonumber(dt)
-    if dt and dt > 0 then M.time = M.time + math.min(dt, 1) end
-    if not state.menu and connect_menu() then modes_changed() end
-    if state.started then
-        step()
-    else
-        start()  -- the map exit is always on
-    end
-end
-
-local original_update = rawget(_G, 'update')
-update = function(dt, ...)
-    if not M.retired then
-        local ok, err = xpcall(frame, debug.traceback, dt)
-        if not ok then
-            M.errors = M.errors + 1
-            note('Error: ' .. tostring(err))
-            if M.errors >= 5 then
-                M.retired = true
-                write_status({'STOPPED - repeated errors; everything works as normal (see ImpatientDiver.log)',
-                              'Impatient Diver ' .. M.version})
-            end
-        end
-    end
-    if type(original_update) == 'function' then return original_update(dt, ...) end
-end
-
-note('Impatient Diver ' .. M.version .. ' loaded')
-M._test = {state = state, values = V, derived = derived, run = run, code = function() return code end,
-           features = FEATURES, zoom = zoom, boost = boost, intro = intro}  -- offline tests
 return M
