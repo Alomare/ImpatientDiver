@@ -29,7 +29,7 @@ The log is `%APPDATA%\Arrowhead\Helldivers2\ImpatientDiver.log`.
 ## Known limits
 
 - **Voice languages.** The silent intro covers the English voice line. With another voice language installed, the title video's line still plays over a black screen until you press a key. Untick the Intro videos option if you prefer the full videos.
-- **Game updates.** The Intro videos option carries a copy of three of the game's sound banks, as of the build it was made for. If an update changes them, untick the option until there's a new version.
+- **Game updates.** The Intro videos option carries a copy of two of the game's sound banks (the start-up logos' and the English cutscene voices), as of the build it was made for. If an update changes them, untick the option until there's a new version.
 - **Squadmates** may see your Helldiver leave the cryo pod early. They don't need the mod.
 - **Picking a drop point again right after going back to the map:** while the camera is still moving back, the zoom plays at normal speed.
 

@@ -4,12 +4,15 @@
 
 Each video is a Bink 2 file (bk2 resource: a 16-byte main part, the file in .stream). The cut keeps the header, the
 frame table of the first frames and their data (the first is a keyframe, the others build on it). The videos are read
-from the game's data with FileDiver's res_get (Script/_shared/filediver). The command line writes a patch of the videos
+from the game's data with FileDiver's res_get (Script/_shared/filediver), or without Go on PATH with Audiodiver's
+reader (the same bytes; finding the packages that hold them reads every package's table, about 40 s). The command
+line writes a patch of the videos
 alone with Audiodiver's patch writer (ProjectAudiodiver/Audiodiver/core), whose header the game loads; the mod's intro option
 carries them in its sound patch instead (intro_sounds.py), since the title videos also wait for their sound.
 --check has ffprobe read each cut file (needs FFmpeg on PATH): one video stream with the frames kept.
 """
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -33,8 +36,35 @@ VIDEOS = [
 ]
 
 
+_READER = {}
+
+
+def read_video_audiodiver(data_dir, fid, most):
+    """read_video through Audiodiver's reader of the game's data (no Go needed)."""
+    sys.path.insert(0, AUDIODIVER)
+    from audiodiver.game import Game, bundle_part
+    if 'game' not in _READER:
+        game, want, where = Game(data_dir), {f for f, _ in VIDEOS}, {}
+        for name in game.packages:
+            try:
+                toc = game.package_toc(name) or []
+            except Exception:
+                continue
+            for f, tid, _, _ in toc:
+                if tid == BK2 and f in want:
+                    where.setdefault(f, name)
+        _READER['game'], _READER['where'] = game, where
+    game, name = _READER['game'], _READER['where'][fid]
+    off, size, s_off, s_size = game.contents(name)[(fid, BK2)]
+    n = min(most, s_size)
+    head = None if name in game.loose else bundle_part(game.data, name + '.stream', s_off, n)
+    return game.package_part(name, off, size), head if head is not None else game.stream_part(name, s_off, n)
+
+
 def read_video(data_dir, fid, most):
     """The video's main part and the first `most` bytes of its file."""
+    if not shutil.which('go'):
+        return read_video_audiodiver(data_dir, fid, most)
     with tempfile.TemporaryDirectory() as tmp:
         prefix = os.path.join(tmp, 'v')
         subprocess.run(['go', 'run', './cmd/res_get', data_dir, 'bk2', '%016x' % fid, prefix, str(most)],

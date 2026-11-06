@@ -1218,6 +1218,153 @@ r.frame(5)
 r.frame(click=True)
 check(r.rate() == 1, 'alone, in the pod again with the loadout page\'s Helldiver: no pick again yet')
 
+# alone, once the loadout screen has shown, a click on its pages is no pick: its weapon and grenade pages hide the
+# Helldiver as the drop location map does (live, every such click zoomed: 65 jumps of 8 s before one drop); back on
+# the map from the loadout view, a pick again zooms again
+r = Run(mode=INSTANT)
+r.ship()
+r.map_page()
+r.in_pod()
+r.frame(60)
+r.frame(click=True)
+check(r.speed() == 'jump', 'a click on the drop location map zooms')
+r.frame(3)
+r.do('T.map.units[#T.map.units + 1] = T.diver({ 1, 2, 3 })')   # the loadout page: its Helldiver
+r.frame(3)
+check(r.speed() == 'x1' and any('the loadout screen is up' in l for l in r.lines()), 'x1 once the loadout view is up')
+r.do('T.ship.units[1].cam.y = 1.2')            # the loadout view
+r.frame(10)
+r.do('T.map.units[#T.map.units].alive = false; T.map.units[#T.map.units] = nil')   # a weapon page: no Helldiver
+r.frame(5)
+for _ in range(5):
+    r.frame(click=True)
+    r.frame(3)
+check(r.speed() == 'x1' and sum('SCENE drop zoom starts' in l for l in r.lines()) == 1,
+      'clicks on the loadout screen\'s weapon and grenade pages speed nothing up')
+r.do('T.ship.units[1].cam.y = 0')              # back on the map
+r.frame(5)
+r.frame(click=True)
+check(r.speed() == 'jump', 'back on the map from the loadout view: a pick again zooms')
+# ... the same after a zoom that went by unsped (its row Off): the camera's spot at the click is the map's
+r = Run(mode=INSTANT)
+r.set('drop_zoom', OFF)
+r.ship()
+r.map_page()
+r.in_pod()
+r.frame(60)
+r.frame(click=True)
+check(r.speed() == 'x1', 'the drop zoom\'s row Off: its zoom plays as it is')
+r.frame(30)
+r.do('T.map.units[#T.map.units + 1] = T.diver({ 1, 2, 3 })')
+r.frame(5)
+r.set('drop_zoom', INSTANT)
+r.do('T.ship.units[1].cam.y = 1.2')
+r.frame(5)
+r.do('T.map.units[#T.map.units].alive = false; T.map.units[#T.map.units] = nil')
+r.frame(3)
+r.frame(click=True)
+check(r.speed() == 'x1', 'the row on again: a click on a weapon page speeds nothing up')
+r.do('T.ship.units[1].cam.y = 0')
+r.frame(5)
+r.frame(click=True)
+check(r.speed() == 'jump', 'the row on again: a pick again zooms')
+
+# the log-in intro is over 1 s of game time after our Helldiver can move (normal play after its walk clip), whatever
+# the camera does
+r = Run()
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame(10)
+r.do('T.keep(T.dest, 6)')
+r.ship()
+r.frame(2)
+r.do('T.ship.units[1].cam.fov = 0.262')
+r.frame(5)
+r.posture(18)                    # the walk clip
+r.frame(15)
+check(r.rate() == 8, 'fast in the walk clip')
+r.posture(3)                     # normal play: the player can move
+r.frame(5)                       # 0.67 s of game time at x8
+check(r.rate() == 8, 'still fast just after the Helldiver can move')
+r.frame(4)                       # 1.2 s
+check(r.rate() == 1 and any('over (the Helldiver can move)' in l for l in r.lines()),
+      'x1 1 s of game time after the Helldiver can move, the camera still narrow')
+check(any('the Helldiver can move, ' in l for l in r.lines()) and any('the camera narrowed' in l for l in r.lines()),
+      'the walk\'s camera and the Helldiver\'s control are logged')
+r.frame(120)
+check(r.rate() == 1, 'x1 after the log-in intro')
+r.outside()
+r.frame()
+check(r.rate() == 8 and any('SCENE FTL starts' in l for l in r.lines()), 'an FTL after it is sped up')
+# ... Instant: one more jump once it can move, then x1
+r = Run(mode=INSTANT)
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame(10)
+r.do('T.keep(T.dest, 6)')
+r.ship()
+r.frame()
+r.do('T.ship.units[1].cam.fov = 0.262')
+r.posture(18)
+r.frame(3)
+check(r.speed() == 'jump', 'Instant: the walk jumps')
+r.posture(3)
+r.frame()
+check(r.speed() == 'jump', 'Instant: one more jump once the Helldiver can move')
+r.frame()
+check(r.speed() == 'x1', 'Instant: x1 after that jump, the camera still narrow')
+# ... normal play with no walk clip before it ends nothing (the camera does)
+r = Run()
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame(10)
+r.do('T.keep(T.dest, 6)')
+r.ship()
+r.frame()
+r.do('T.ship.units[1].cam.fov = 0.262')
+r.posture(3)
+r.frame(30)                      # 4 s of game time
+check(r.rate() == 8, 'normal play without the walk clip before it: the walk goes on')
+r.do('T.ship.units[1].cam.fov = 1.134')
+r.frame()
+check(r.rate() == 1, 'x1 the frame the camera goes wide')
+# ... and a walk whose end never shows: over at its cap (24 s of game time), so it holds up no scene after it
+r = Run()
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame(10)
+r.do('T.keep(T.dest, 6)')
+r.ship()
+r.frame()
+r.do('T.ship.units[1].cam.fov = 0.262')
+r.frame(170)                     # 22.8 s of game time at x8 into the walk
+check(r.rate() == 8, 'a walk whose end never shows: fast until its cap')
+r.frame(20)                      # 25.5 s
+check(r.rate() == 1 and any('the walk to the bridge reached its cap' in l for l in r.lines()),
+      'x1 at the walk\'s cap')
+r.frame(60)
+r.outside()
+r.frame()
+check(r.rate() == 8 and any('SCENE FTL starts' in l for l in r.lines()),
+      'over at its walk\'s cap, the log-in intro holds up no FTL after it')
+
+# the main world swapping every frame as a mission loads: one line as it starts, the swaps counted once it settles,
+# and the Helldiver's line not again for each swap
+r = Run()
+r.ship()
+r.frame(60)
+r.do('T.me.alive = false')       # (ours gone, as in the launch)
+r.frame(60)
+n0 = len(r.lines())
+for i in range(30):
+    r.do('T.main = T.dest' if i % 2 == 0 else 'T.main = T.ship')
+    r.frame()
+r.frame(70)
+lines = r.lines(n0)
+check(sum('MAIN world' in l for l in lines) == 2 and any(l.endswith('after 29 swaps') for l in lines),
+      'the main world\'s swaps: one line as they start, then their count')
+check(not any('HELLDIVER' in l for l in lines), 'no Helldiver line for each swap')
+
 # switched off in the F9 menu mid-scene: the game's clock goes back
 r = Run()
 r.outside(54)

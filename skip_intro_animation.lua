@@ -2,7 +2,8 @@
 -- HD2-Requires: chef-shared-loader >= 1.5.1
 -- Impatient Diver, for Chef Shared Loader (Lua 5.1, no FFI). How it works in the game: RESEARCH.md.
 -- It speeds scenes up by itself, each as its row in the F9 menu says (Off, Fast or Instant; Instant by default):
---   the log-in intro: from its outside shot until the ship's camera, narrowed for the walk to the bridge, is wide again;
+--   the log-in intro: from its outside shot until our Helldiver can move after its walk to the bridge, or the ship's
+--   camera, narrowed for the walk, is wide again;
 --   the cryo pod (joining a lobby): while our Helldiver is in the pod's loop or its walk-out clip;
 --   the FTL: while the Super Destroyer's big outside world (the FTL's) holds its cannons;
 --   a lobby change (joining or leaving, on the FTL's row): the destroyer's small outside shot as it begins over our
@@ -10,9 +11,11 @@
 --   the hellpod entry: while our Helldiver plays its stepping-in clip, then while the camera holds its close-up on
 --   the pod (a client's, before it pulls out to the drop location map);
 --   the drop zoom: alone, from a click on the drop location map, from inside the hellpod, until the loadout page opens
---   and its camera move is over; as host with others, from the moment every player's Helldiver is in its hellpod
---   after a click, until the camera's move into the loadout view is over (a client's zoom follows the host's); back
---   on the map from the loadout view, the next click zooms again (alone too), until the camera's move is over.
+--   and its camera move is over (once the loadout screen has shown, a click on its pages is no pick: its weapon and
+--   grenade pages hide the Helldiver as the map does); as host with others, from the moment every player's Helldiver
+--   is in its hellpod after a click, until the camera's move into the loadout view is over (a client's zoom follows
+--   the host's); back on the map from the loadout view, the next click zooms again (alone too), until the camera's
+--   move is over.
 -- Fast: time x8. Instant: at x1 the clock jumps 1 s every frame, up to a bit more than the scene's length, then x8 for
 -- what is left (the log-in intro's outside shot and its walk to the bridge each have their own jumps and cap, as do
 -- the cryo pod's wait and its walk-out; the walk-out starts with 30 frames at x8, for the game to place the Helldiver).
@@ -24,7 +27,7 @@
 -- and jumps, the speed changes, the session and what marks the scenes. Each line starts with the real seconds since
 -- the mod started.
 local chef = ...
-local M = { version = '9' }
+local M = { version = '10-recon-1' }
 local TITLE = 'Impatient Diver (CSL/EAC)'   -- the name mod loaders show (the F9 menu's group; Arsenal's in the build)
 
 local sr = stingray
@@ -48,6 +51,9 @@ local JUMP_MOST = { ['log-in intro'] = 6, walk = 16, ['cryo pod'] = 12, ['walk-o
                     ['lobby change'] = 12, ['hellpod entry'] = 12, ['pod view'] = 6, ['drop zoom'] = 7 }
 local PLACE_FRAMES = 30      -- the cryo pod's walk-out at x8 first: the game places the Helldiver a few frames in
 local CAP = 45               -- game seconds a scene (each part of the log-in intro) may be sped up
+local WALK_CAP = 24          -- ... but the walk to the bridge (7 to 12 jumped): then the log-in intro is over
+local WALK_SETTLE = 1        -- game seconds (jumps in) the walk goes on once our Helldiver can move (its camera
+                             -- widens 0.5 s after that, for 1.4 s; jumped on, a player holding a key ran meanwhile)
 local AFTER_MISSION = 90     -- real seconds at most after a mission with no outside shot sped up (the return plays as
                              -- it is): until the ship has loaded with no outside shot left
 local WIDE_FOV = 1.0         -- the main camera wider than this (1.134 in play): the player has it
@@ -84,8 +90,9 @@ local HELLDIVER = '4d1c334d294dfa97'      -- content/fac_helldivers/cha_avatar/a
 -- the posture layer's states in this build's avatar_helldiver (0-based, as Unit.animation_get_state reports them):
 -- the clip stepping into the hellpod (entered by event 0xa9b0a3bb from any state) and the loop inside it, which the
 -- clip's end event leads to; the cryo pod's loop (event 0x2a49b45b) and its walk-out clip (event 0x23173e19, as in
--- build 25480438; its end event leads to 3, normal play)
-local POSTURE, POD_ENTER, POD_IN, CRYO_IN, CRYO_OUT = 14, 15, 17, 0, 6
+-- build 25480438; its end event leads to 3, normal play); the walk to the bridge after the log-in (a clip whose end
+-- event leads to 3) and normal play
+local POSTURE, POD_ENTER, POD_IN, CRYO_IN, CRYO_OUT, WALK_CLIP, PLAY = 14, 15, 17, 0, 6, 18, 3
 local MAP_KIND = '96af7d6acb949f34'       -- content/art_shared/meshes/plane_2x2m: the loadout screen's world
 -- content/env_ship/hangar/se_destroyer_supportcannon_ missile_launcher, orbital_cannon_single, orbital_gatling_single,
 -- planet_killer (the ship's world has them too: they only count in a small world)
@@ -231,6 +238,9 @@ end
 
 local next_scan, last_scan = 0, -1
 local ship_seen = false
+-- the main world's changes, logged; while a mission or a lobby loads it swaps between two worlds every frame or so:
+-- those swaps are counted and logged once it settles
+local swaps = { before = nil, at = -1, n = 0 }
 
 -- a ship loaded again since `t` and still there (a lobby change reloads it under the destroyer's outside shot)
 local function ship_reloaded_since(t)
@@ -275,11 +285,21 @@ local function watch_worlds(now)
     end
   end
   if me ~= main_e then
+    local back = me ~= nil and me == swaps.before and now - swaps.at < 1   -- back to the one before, within a second
+    swaps.before, swaps.at = main_e, now
     main_e = me
-    log('MAIN world %s (%s units)', me and me.n or '-', me and me.count or '-')
+    if back then swaps.n = swaps.n + 1
+    else
+      log('MAIN world %s (%s units)%s', me and me.n or '-', me and me.count or '-',
+        swaps.n > 0 and fmt(', after %d swaps', swaps.n) or '')
+      swaps.n = 0
+    end
     -- its cameras found at once (not on every frame while a mission loads: the main world swaps back and forth then),
     -- and always for the ship's first load: the walk to the bridge is told by its camera, and may be short
     if now - last_scan >= SCAN_AGAIN or not ship_seen then next_scan = 0 end
+  elseif swaps.n > 0 and now - swaps.at >= 1 then
+    log('MAIN world %s (%s units), after %d swaps', me and me.n or '-', me and me.count or '-', swaps.n)
+    swaps.n = 0
   end
 end
 
@@ -488,11 +508,11 @@ local function look_up_diver(now)
     if found then ours.unit, ours.e, ours.how = found, main_e, how end
   end
   local said = how .. ' ' .. #all
-  if found ~= diver.unit or said ~= diver.said or w ~= diver.world then
+  if found ~= diver.unit or said ~= diver.said then   -- (not for the main world alone: it swaps as a mission loads)
     if found ~= diver.unit then diver.posture = nil end
-    diver.unit, diver.said, diver.world = found, said, w
     log('HELLDIVER %s (%d in main world %s)', how, #all, main_e and main_e.n or '-')
   end
+  diver.unit, diver.said, diver.world = found, said, w
 end
 
 -- ours not known with several Helldivers aboard: the camera, sampled while the ship is the main world
@@ -562,17 +582,41 @@ local function main_cam_at()
   return Vector3.to_elements(Camera.world_position(c))
 end
 
+-- the loadout screen's world (small, with its floor of planes); its `diver` is up while the loadout page shows (the
+-- drop location map and the loadout screen's weapon and grenade pages show none)
+local function loadout_world()
+  for _, e in ipairs(worlds) do
+    if e ~= main_e and e.count <= SMALL and e.kinds[MAP_KIND] then return e end
+  end
+end
+
 -- While ours is in the hellpod on the ship, the clicks. With other players aboard, a click picks the drop point and the
 -- zoom waits for every player's Helldiver in its hellpod (the camera moves into the loadout view 1 s after the last one
 -- is in); `picked` holds the click, `zoomed` says the zoom went by, until ours leaves the pod or the camera is back on
 -- the map from the loadout view (`map` its spot as the zoom began, `away` once it left it): a new pick then (`again`,
 -- alone too; left alone it plays 1.2 s from the click to the camera's move, then 0.9 s).
-local pod = { picked = false, zoomed = false, map = nil, away = false, again = false }
+-- Alone, `page` says the loadout screen has shown (its page's Helldiver) in this stay in the pod: its weapon and
+-- grenade pages hide that Helldiver as the map does, so from then on only a pick again counts (`spot`: where the
+-- camera was at the last click on the map, for a zoom that went by without being sped up).
+local pod = { picked = false, zoomed = false, map = nil, away = false, again = false, page = false, spot = nil }
 
 local function watch_pod(click)
   if posture() ~= POD_IN or not (main_e and main_e.count > SHIP) then
     pod.picked, pod.zoomed, pod.map, pod.away, pod.again = false, false, nil, false, false
+    pod.page, pod.spot = false, nil
     return
+  end
+  if not other_players() then
+    local lw = loadout_world()
+    if lw and lw.diver and not pod.page then
+      pod.page = true
+      if not pod.zoomed then pod.zoomed, pod.map = true, pod.map or pod.spot end
+      log('drop zoom: the loadout screen is up (a click on its pages is no pick)')
+    end
+    if click and not pod.page then
+      local x, y, z = main_cam_at()
+      if x then pod.spot = { x, y, z } end
+    end
   end
   if pod.zoomed and pod.map then
     local x, y, z = main_cam_at()
@@ -621,10 +665,12 @@ end
 -- { name, world (the destroyer's entry), real (when it started), t (game s since it started, jumps in), paced (the
 --   same, paced), jumped and jumps (the jumps' seconds and count), left (the part's jump seconds left), from (t when
 --   the part began, for the cap), steps (its first steps' lengths), capped, spent (the part's jumps are over), walk
---   (paced s since the ship loaded: the walk to the bridge, the log-in intro's second part) and narrowed (its camera
---   was narrow) for the log-in intro, out_frames (frames of the walk-out) for the cryo pod, in_pod (the clip is over)
---   for the hellpod entry, loaded (the next ship is there) for a lobby change, by_cam (it ends by the camera: other players aboard, or a pick again), cam (where
---   the main camera was as it began) and page (t when the loadout page opened, or the camera moved) for the drop zoom }
+--   (paced s since the ship loaded: the walk to the bridge, the log-in intro's second part), narrowed (its camera
+--   was narrow), walked (our Helldiver played its walk clip) and control (t when it could move) for the log-in intro,
+--   out_frames (frames of the walk-out) for the cryo pod, in_pod (the clip is over) for the hellpod entry, loaded (the
+--   next ship is there) for a lobby change, by_cam (it ends by the camera: other players aboard, or a pick again), cam
+--   (where the main camera was as it began) and page (t when the loadout page opened, or the camera moved) for the
+--   drop zoom }
 local scene = nil
 local block_until = -1       -- the return from a mission: no outside shot sped up until then
 local mission_end, return_shot = nil, false   -- (return_shot: its outside shot was seen)
@@ -648,13 +694,6 @@ local function loadout()
   return false
 end
 
--- the loadout screen's world (small, with its floor of planes); its `diver` is up once the loadout page shows
-local function loadout_world()
-  for _, e in ipairs(worlds) do
-    if e ~= main_e and e.count <= SMALL and e.kinds[MAP_KIND] then return e end
-  end
-end
-
 -- what a scene going on needs to know this frame
 local function progress(dt, paced, landed, now_real)
   if not scene then return end
@@ -669,12 +708,24 @@ local function progress(dt, paced, landed, now_real)
     if cam then
       if not scene.walk then
         -- the walk to the bridge: its own jumps and cap (the outside shot may have spent its own waiting for the ship)
-        log('SCENE log-in intro: the ship is there %.2f s real after it began (%.1f s of game time, %.1f s jumped)',
-          now_real - scene.real, scene.t, scene.jumped)
+        log('SCENE log-in intro: the ship is there %.2f s real after it began (%.1f s of game time, %.1f s jumped); '
+          .. 'camera fov %.3f', now_real - scene.real, scene.t, scene.jumped, cam.fov)
         scene.walk, scene.left, scene.from, scene.spent, scene.capped = 0, JUMP_MOST.walk, scene.t, nil, nil
       end
       scene.walk = scene.walk + paced
-      if cam.fov <= WIDE_FOV then scene.narrowed = true end
+      if cam.fov <= WIDE_FOV and not scene.narrowed then
+        scene.narrowed = true
+        log('SCENE log-in intro: the camera narrowed (fov %.3f), %.1f s of game time into the walk', cam.fov,
+          scene.t - scene.from)
+      end
+    end
+    -- our Helldiver's walk clip, then normal play: the player can move
+    local p = posture()
+    if p == WALK_CLIP then scene.walked = true
+    elseif p == PLAY and scene.walked and not scene.control then
+      scene.control = scene.t
+      log('SCENE log-in intro: the Helldiver can move, %.2f s real after it began; camera fov %s',
+        now_real - scene.real, cam and fmt('%.3f', cam.fov) or '-')
     end
   elseif scene.name == 'cryo pod' and posture() == CRYO_OUT then
     scene.out_frames = (scene.out_frames or 0) + 1
@@ -708,9 +759,10 @@ local function progress(dt, paced, landed, now_real)
           .. 'hellpod (%.2f s paced)', scene.t, scene.paced)
       end
     else
+      -- (watch_pod keeps the map's spot for a pick again, and that the loadout screen has shown)
       local lw = loadout_world()
       if lw and lw.diver then
-        scene.page, pod.zoomed, pod.map = scene.t, true, scene.cam
+        scene.page = scene.t
         log('drop zoom: the loadout page opened %.2f s of game time after the click (%.2f s paced)', scene.t,
           scene.paced)
       end
@@ -722,6 +774,9 @@ end
 local function pick(mission, now, click)
   if mission then return nil, 'a mission' end
   if scene and scene.name == 'log-in intro' then
+    -- our Helldiver back in normal play after its walk clip: the player has it, whatever the camera does
+    if scene.control and scene.t - scene.control >= WALK_SETTLE then return nil, 'the Helldiver can move' end
+    if scene.walk and scene.t - scene.from >= WALK_CAP then return nil, 'the walk to the bridge reached its cap' end
     local cam = ship_cam()
     if not cam then         -- still outside: the destroyer's world keeps it going
       if not listed(scene.world) or scene.world.count <= 1 then return nil, "the destroyer's world emptied" end
@@ -761,7 +816,9 @@ local function pick(mission, now, click)
   if ship and (posture() == CRYO_IN or posture() == CRYO_OUT) then return 'cryo pod' end
   if ship and click and posture() == POD_IN and not other_players() then
     local lw = loadout_world()
-    if lw and not lw.diver then return 'drop zoom' end
+    -- the drop location map: the loadout screen's world before its page has shown (watch_pod notes it the frame its
+    -- Helldiver shows)
+    if lw and not pod.page then return 'drop zoom' end
     if pod.again then return 'drop zoom' end   -- (the loadout page's Helldiver stays as the camera goes back)
   end
   -- With other players the zoom waits for every player's Helldiver in its hellpod, after a click (the host's clicks
@@ -807,7 +864,10 @@ local function apply(dt, now, mission, click, paced, landed)
   if name and not scene then
     scene = { name = name, world = d, real = now, t = 0, paced = 0, jumped = 0, jumps = 0, left = JUMP_MOST[name],
               from = 0, steps = {} }
-    if name == 'drop zoom' then scene.by_cam, scene.cam = other_players() or pod.again, { main_cam_at() } end
+    if name == 'drop zoom' then
+      local x, y, z = main_cam_at()
+      scene.by_cam, scene.cam = other_players() or pod.again, x and { x, y, z } or nil
+    end
     log('SCENE %s starts (%s; %s; %s)', name, MODE_NAMES[mode_of(name)],
       d and fmt('destroyer world %d, %d units', d.n, d.count) or 'posture ' .. tostring(posture()), session_said or '?')
   end

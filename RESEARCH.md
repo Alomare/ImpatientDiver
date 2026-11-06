@@ -32,7 +32,7 @@ Worlds print alike: compare with `==`.
 | Log-in intro | 54 to 63, as the main world, before any ship has loaded |
 | Return from a mission | about 41, about 50 s until the ship has loaded under it |
 
-- **The loadout screen:** a small world with its floor of `content/art_shared/meshes/plane_2x2m` (`96af7d6acb949f34`). It gains an `avatar_helldiver` as the loadout page opens, and keeps it when the player goes back to the map.
+- **The loadout screen:** a small world with its floor of `content/art_shared/meshes/plane_2x2m` (`96af7d6acb949f34`). It gains an `avatar_helldiver` as the loadout page opens, and keeps it when the player goes back to the map. Its weapon and grenade pages drop that Helldiver again (20 units, as on the map), so alone the Helldiver doesn't tell the map from them; there the main camera stays away from its spot on the map.
 - As a client, the FTL's world can be the main world for a while. While a mission or a lobby loads, the main world can swap between two worlds every frame.
 
 ### The Helldiver's posture
@@ -47,6 +47,7 @@ Worlds print alike: compare with `==`.
 | 15 | Stepping into the hellpod (event `0xa9b0a3bb` from any state) |
 | 17 | The loop inside the hellpod |
 | 16 | Leaving the hellpod |
+| 18 | The walk to the bridge after logging in (a clip; its end leads to 3) |
 | 36 | The default state, as a Helldiver spawns |
 
 State numbers move with the game's state machine: they differ between builds on other layers. FileDiver's `cryo_probe` dumps the machine. Check these after a game update.
@@ -73,7 +74,7 @@ The main world's first camera is the only one that moves in these scenes.
 
 ## The scenes
 
-- **Log-in intro:** 3.33 s of timed phases, then a wait for the ship's load, then the walk to the bridge.
+- **Log-in intro:** 3.33 s of timed phases, then a wait for the ship's load, then the walk to the bridge. The player can move once the Helldiver goes from 18 to 3; the camera starts widening about 0.5 s later and takes 1.4 s (jumped a second a frame, it read wide 2 to 7 frames after the 3).
 - **Cryo pod:** the pod rolling in and a 1 s wait alone. After joining a lobby, 2.3 to 3.5 s real of loading however much is jumped. Then a 7.5 s walk-out, whose first frames need normal steps: the game places the Helldiver a few frames in.
 - **FTL:** runs while its world holds the cannons. Don't end it when the world shrinks: the arrival plays in the shrunk world, and a player sees it twice.
 - **Lobby change:** begins over our loaded ship, or as the old ship empties the frame the cannons show (at most 0.3 s after). The next ship loads 0.5 to 2.4 s later, then 3 to 6 jumps end it. The launch looks alike, except that its ship empties a second before its cannons with the Helldiver in the pod.
@@ -87,7 +88,8 @@ The main world's first camera is the only one that moves in these scenes.
 - The title's video ends only once its voice line has finished, so a cut picture alone leaves a black screen with the line playing. Each logo has a sound of its own too.
 - The patch silences every clip of `content/audio/intro_logos` and the title's voice line in `content/audio/<language>/cutscenes`.
 - Sound object ids of those lines differ by language and change with updates; their parent object stays (`631201114` for the 100.7 s line). Build 26251122 removed the short line (parent `394469756`) and six others from the English bank.
-- `cutscenes_sfx` also holds the ship cutscenes' sounds, and the patch carries a whole copy of each bank it changes, so an update can make a copy stale. Rebuild after updates that touch these banks.
+- `content/audio/cutscenes_sfx` (the ship cutscenes' sounds) holds copies of all nine intro_logos clips (62 objects in both banks) and of 58 sounds of `content/audio/foley_player`. A patch carries a bank whole, so a copy of cutscenes_sfx in it would put the game's version of the rest of that bank over another sound mod's: the patch changes only intro_logos and the cutscenes banks. The game plays the first loaded copy of a sound, and intro_logos is the only bank in the start-up's package (`packages/splash`, `83fa1822be1891ab`); cutscenes_sfx is in a cutscene package (`4f2ac109b7ad817a`).
+- The patch carries a whole copy of each bank it changes, so an update can make a copy stale. Rebuild after updates that touch these banks.
 - Only the voice languages installed where the patch is built can be covered.
 
 ## What can't be done from Lua 5.1 this way

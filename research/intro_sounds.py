@@ -10,6 +10,12 @@ Audiodiver calls "skip"), so it ends at once:
 - the two voice lines the title videos play, in every voice language the game has installed: in a language's
   content/audio/<code>/cutscenes bank, each is the one Sound under its parent object. A language not installed where
   the patch is built keeps its lines, and its players hear them over a black screen until they press a key.
+
+Only those banks are patched. content/audio/cutscenes_sfx holds copies of the same nine clips (and of 58 sounds of
+content/audio/foley_player), and a patch carries a bank whole: a copy of it here would put back the game's version of
+everything else in it over another mod's (a sound mod that patches it too). The game plays the first loaded copy of a
+sound, and intro_logos is the start-up's own package (packages/splash), so its silent copies are the ones the intro
+plays.
 """
 import os
 import struct
@@ -48,11 +54,12 @@ def parent_of(t, body):
 
 
 def sources(ix, log=print):
-    """[(source id, what it is)] of the sounds the option makes silent."""
+    """[(source id, what it is, the bank it is silenced in)] of the sounds the option makes silent."""
     out = []
-    b = ix.banks[bank_id(INTRO_LOGOS)]
+    logos = bank_id(INTRO_LOGOS)
+    b = ix.banks[logos]
     for sid in dict.fromkeys([*b['refs'], *b['media']]):
-        out.append((sid, 'intro_logos clip'))
+        out.append((sid, 'intro_logos clip', logos))
     for code, language in LANGUAGES.items():
         bid = bank_id('content/audio/%s/cutscenes' % code)
         if bid not in ix.banks:
@@ -69,7 +76,7 @@ def sources(ix, log=print):
                 assert code != 'us' or parent != LONG_LINE, 'English has to have the long line: its parent changed?'
                 continue
             t, body = hirc[found[0]]
-            out.append((wbank.source_ids(t, body)[0], '%s, %s' % (language, what)))
+            out.append((wbank.source_ids(t, body)[0], '%s, %s' % (language, what), bid))
     return out
 
 
@@ -77,11 +84,14 @@ def build(out_dir, data_dir=intro_videos.GAME_DATA, log=print):
     """Writes out_dir/9ba626afa44a3aa3.patch_0 (+ .stream, .gpu_resources): the silent sounds and the cut videos."""
     ix = AudioIndex(log=lambda *a: None)
     picked = sources(ix, log)
-    for sid, what in picked:
+    for sid, what, _ in picked:
         ms = wem.length_ms(ix.wem(sid)[:4096])
         log('  silent: %d, %s s (%s)' % (sid, '%.1f' % (ms / 1000) if ms else '?', what))
-    project = Project(name='Impatient Diver intro', every_bank=True,
-                      replacements=[Replacement(target=sid, audio='', silence=True, fit_timing=True) for sid, _ in picked])
+    # each sound only in the bank it was found in (Audiodiver's "imported" banks: build.reach keeps a sound to them)
+    project = Project(name='Impatient Diver intro', project_banks_only=True,
+                      imported_banks=sorted({bank for _, _, bank in picked}),
+                      replacements=[Replacement(target=sid, audio='', silence=True, fit_timing=True)
+                                    for sid, _, _ in picked])
     project.path = Path(out_dir) / 'intro.audi'
     os.makedirs(out_dir, exist_ok=True)
     make_patch(project, ix, Path(out_dir), log=log, carried=intro_videos.carried(data_dir))
