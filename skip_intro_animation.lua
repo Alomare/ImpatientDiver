@@ -23,12 +23,13 @@
 -- outside shot in the return from a mission (until its own is over, 90 s at most). With other players too: only our
 -- own Helldiver's posture counts (found as the Helldiver section says; until then only a posture every player's
 -- Helldiver shares). Only Fast shows a notice.
+-- Solo Pause (its own F9 row, Off by default): a key holds the game's clock while no one else is in the session.
 -- Log: ImpatientDiver.log in the loader's folder (%APPDATA%\Arrowhead\Helldivers2): the scenes with their game time
 -- and jumps, the speed changes, the session and what marks the scenes. Each line starts with the real seconds since
 -- the mod started.
 local chef = ...
-local M = { version = '10-recon-1' }
-local TITLE = 'Impatient Diver (CSL/EAC)'   -- the name mod loaders show (the F9 menu's group; Arsenal's in the build)
+local M = { version = '10' }
+local TITLE = 'Impatient Diver'   -- the name mod loaders show (the F9 menu's group; Arsenal's in the build)
 
 local sr = stingray
 local Application, World, Unit, Camera, Vector3, IdString64 =
@@ -639,11 +640,11 @@ local function set_rate(r, why, mode)
   local ok, err = chef.call('Application.set_time_step_policy', 'external_multiplier', r)
   if ok == nil and err then
     broken = true
-    log('RATE x%d failed: %s (no more speed changes)', r, tostring(err))
+    log('RATE x%g failed: %s (no more speed changes)', r, tostring(err))
     return
   end
   rate = r
-  log('RATE x%d (%s)', r, why)
+  log('RATE x%g (%s)', r, why)
   -- a notice for Fast only (its x8, and the x1 after it); Instant goes by without one
   if mode == FAST_MODE or (mode == nil and rate_by == FAST_MODE) then say('TIME X' .. r) end
   rate_by = mode
@@ -660,6 +661,85 @@ local function ask_jump()
     return
   end
   asked = JUMP
+end
+
+-- ------------------------------------------------------------------ the solo pause
+-- A key (F6 by default) holds the game's clock at x0.001 while this game is alone in its session, whatever scene is
+-- on; on its 1 FPS choice the engine's whole loop is throttled too (the multiplier only scales game time). Off by
+-- default. It ends by itself when the row goes Off, or as soon as another player is in or joining the session.
+local PAUSE_ID, PAUSE_OFF, PAUSE_ON, PAUSE_FPS = 'solo_pause', 1, 2, 3
+local PAUSE_NAMES = { 'Off', 'On', 'On (1 FPS)' }
+local PAUSE_RATE = 0.001
+local paused, throttled, throttle_broken = false, false, false
+local pause_key = nil
+if menu then
+  chef.option(PAUSE_ID, { type = 'choice', label = 'Solo Pause',
+    hint = 'A key pauses the game while no one else is in your session. 1 FPS also lowers the frame rate while paused.',
+    choices = { 'Off', 'On', 'On (1 FPS)' }, default = PAUSE_OFF })
+  if chef.on_change then
+    chef.on_change(PAUSE_ID, function(v) log('OPTION Solo Pause: %s', tostring(PAUSE_NAMES[v] or v)) end)
+  end
+  if chef.has('bind') and chef.bind then pause_key = chef.bind('solo_pause_key', 'f6', 'Solo Pause key') end
+end
+
+local function pause_mode()
+  local v = menu and chef.get(PAUSE_ID)
+  return (v == PAUSE_ON or v == PAUSE_FPS) and v or PAUSE_OFF
+end
+
+local function alone()
+  local joining = chef.joining and chef.joining()
+  return not other_players() and (type(joining) ~= 'number' or joining == 0)
+end
+
+-- the player's frame rate limit from the game's settings, read as the pause ends (it may have changed), or nil: none is
+-- set, or it can't be read. 'no_throttle' alone leaves the game uncapped, whatever the setting says.
+local function game_frame_limit()
+  first('Application.user_setting')
+  local enabled = chef.call('Application.user_setting', 'framerate_limit_enabled')
+  local limit = chef.call('Application.user_setting', 'framerate_limit')
+  if enabled ~= false and type(limit) == 'number' and limit > 0 then return limit end
+  return nil
+end
+
+local function set_throttle(on)
+  if throttle_broken or throttled == on then return end
+  first('Application.set_time_step_policy (throttle)')
+  local ok, err
+  local limit = not on and game_frame_limit() or nil
+  if on then ok, err = chef.call('Application.set_time_step_policy', 'throttle', 1)
+  elseif limit then ok, err = chef.call('Application.set_time_step_policy', 'throttle', limit)
+  else ok, err = chef.call('Application.set_time_step_policy', 'no_throttle') end
+  if ok == nil and err then
+    throttle_broken = true
+    log('FRAME THROTTLE failed: %s (no more throttling)', tostring(err))
+    return
+  end
+  throttled = on
+  log('FRAME THROTTLE %s', on and '1 FPS'
+    or limit and fmt("back to the game's limit, %g FPS", limit) or 'off (no limit set)')
+end
+
+local function set_paused(on, why)
+  paused = on
+  log('SOLO PAUSE %s (%s)', on and 'on' or 'off', why)
+  say(on and 'PAUSED' or 'RESUMED')
+end
+
+local function check_pause()
+  local mode = pause_mode()
+  local press = pause_key and pause_key.pressed and pause_key.pressed() == true
+  if paused then
+    if mode == PAUSE_OFF then set_paused(false, 'the row is Off')
+    elseif broken then set_paused(false, 'speed changes failed')
+    elseif not alone() then set_paused(false, 'another player is in the session')
+    elseif press then set_paused(false, 'the key')
+    end
+  elseif press and mode ~= PAUSE_OFF and not broken then
+    if alone() then set_paused(true, PAUSE_NAMES[mode])
+    else say('SOLO PAUSE: OTHER PLAYERS IN SESSION') end
+  end
+  set_throttle(paused and mode == PAUSE_FPS)
 end
 
 -- { name, world (the destroyer's entry), real (when it started), t (game s since it started, jumps in), paced (the
@@ -882,14 +962,14 @@ local function apply(dt, now, mission, click, paced, landed)
   local mode = scene and not scene.capped and mode_of(scene.name) or nil
   -- (the cryo pod's walk-out holds its first frames at x8)
   local hold = scene and scene.out_frames and scene.out_frames <= PLACE_FRAMES
-  local jump = mode == INSTANT and scene.left > 0 and not hold
-  if mode == INSTANT and scene.left <= 0 and not scene.spent then
+  local jump = not paused and mode == INSTANT and scene.left > 0 and not hold
+  if not paused and mode == INSTANT and scene.left <= 0 and not scene.spent then
     scene.spent = true
     log('SCENE %s: %.1f s jumped, x%d for the rest', scene.name, scene.jumped, FAST)
   end
-  local want = mode and (jump and 1 or FAST) or 1
-  local why = scene and scene.name or note or 'no scene'
-  if want ~= rate then set_rate(want, why, mode) end
+  local want = paused and PAUSE_RATE or (mode and (jump and 1 or FAST) or 1)
+  local why = paused and 'solo pause' or scene and scene.name or note or 'no scene'
+  if want ~= rate then set_rate(want, why, paused and 'solo pause' or mode) end
   if jump ~= jumping then
     jumping = jump
     log('JUMPS %s (%s)', jump and fmt('of %d s a frame', JUMP) or 'off', why)
@@ -901,13 +981,25 @@ end
 local next_session, was_host = 0, nil
 local was_mission, mouse_was = false, false
 
+-- A mission replaces the ship's units, and any engine call on a unit from before it (Unit.alive too) can end the game:
+-- no unit handle is kept over a mission, and the first frame after it scans again.
+local function drop_handles()
+  for _, e in ipairs(worlds) do e.cams, e.small_cams = {}, nil end
+  diver.unit, diver.all, diver.world, diver.said, diver.posture = nil, {}, nil, nil, nil
+  others.label, others.posture, others.shared = {}, {}, nil
+  has_sm, follow.cam, follow.last, follow.score = {}, nil, {}, {}
+  next_scan = 0
+end
+
 function M.update(dt)
   local now = clock()
   dt = type(dt) == 'number' and dt or 0
-  -- the jump asked last frame is in this step; the rest is paced (the step x8 would have made)
+  check_pause()
+  -- the jump asked last frame is in this step; the rest is paced (the step x8 would have made; paused, no more than
+  -- the game's own clock, so a scene's wait doesn't run out during the pause)
   local landed = (asked > 0 and dt >= asked) and asked or 0
   asked = 0
-  local paced = min((dt - landed) * FAST / rate, STEP_MOST)
+  local paced = (paused or rate == PAUSE_RATE) and dt or min((dt - landed) * FAST / rate, STEP_MOST)
   diver.now = nil
   local down = chef.mouse_down and chef.mouse_down('left') == true
   local click = down and not mouse_was
@@ -919,6 +1011,7 @@ function M.update(dt)
     log('in mission: %s', tostring(mission))
     if mission then
       forget_ours('a mission')
+      drop_handles()
       diver.last = nil
     else
       block_until, mission_end, return_shot = now + AFTER_MISSION, now, false
@@ -975,15 +1068,20 @@ end
 -- Switched off in the F9 menu, or stopped after errors: the game's clock goes back. With this the loader stops the mod
 -- instead of pausing it, and a new copy starts when it's switched on again.
 function M.on_stop()
+  paused = false
+  set_throttle(false)
   if rate ~= 1 then set_rate(1, 'stopped') end
 end
 
 function M.shutdown()
+  paused = false
+  set_throttle(false)
   if rate ~= 1 then set_rate(1, 'shutdown') end
 end
 
 local modes = {}
 for i, row in ipairs(ROWS) do modes[i] = row.label .. ' ' .. MODE_NAMES[mode_of(row.scene)] end
+modes[#modes + 1] = 'Solo Pause ' .. PAUSE_NAMES[pause_mode()]
 log('Impatient Diver V%s on Chef Shared Loader %s (api %s), engine build %s %s, %.2f s after launch; %s%s', M.version,
   tostring(chef.loader_version), tostring(chef.api), tostring(Application.build and Application.build()),
   tostring(Application.build_identifier and Application.build_identifier()), clock(), table.concat(modes, ', '),

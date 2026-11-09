@@ -9,6 +9,7 @@ The research behind V8 and older (the cutscene manager, scene phases, hellpod se
 - `Application.set_time_step_policy('external_multiplier', n)` scales the engine's step, and game.dll's scene clock follows it. At x8 the world ran at 8.00x (about 0.117 s a step at 69 fps).
 - `system_step_range` defaults to 0 to 0.2 s a step, so x8 below 40 fps is clamped.
 - `Application.set_time_step_policy('jump', s)` makes the next step `s` longer, past that clamp. One 5 s jump was fine in every scene tried. Scene timers end up to a jump late.
+- `Application.set_time_step_policy('throttle', fps)` caps the engine's loop. `'no_throttle'` also removes the cap set by the game's own Frame Rate Limit setting, so to end a throttle, set `'throttle'` back to `Application.user_setting('framerate_limit')` when `framerate_limit_enabled` is on.
 - Loading runs on real time: jumping doesn't shorten it. A cap per scene keeps a wait for loading from eating all the jumps.
 - Sounds aren't sped up: they play on at normal speed after a skipped scene.
 - The loader's own clock (`chef.time()`) follows game time, so its timers speed up too. Use `os.clock` for real time.
@@ -61,7 +62,7 @@ Other players' avatars play the same postures on our machine, and in this build 
 - Else the one the camera follows: while the camera moves, ours keeps its offset to it and the others don't.
 - Not known yet: a posture every player's Helldiver shares counts (joining a lobby in its hellpods, all step in at once).
 
-Keep it while its unit lives and its world still holds the ship; let it go in a mission.
+Keep it while its unit lives and its world still holds the ship; let it go in a mission. Chef Shared Loader warns that any call on a unit from an earlier engine world, `Unit.alive` included, can end the game, so the mod drops every unit handle when a mission starts and scans again after it.
 
 ### The main camera
 
@@ -100,7 +101,7 @@ The main world's first camera is the only one that moves in these scenes.
 
 ## Prior art and credits
 
-Facts other mods taught; no code of theirs is used.
+Solo Pause is based on code by [Parley6](https://forums.nexusmods.com/profile/106924698-parley6/). The rest are facts other mods taught; no code of theirs is used.
 
 - [War Journalist](https://github.com/HWG90/DBF_PhotoMode): the time step policy for slowing the game.
 - Skip All Intro (Nexus 17681): which videos and sound banks the intro uses.

@@ -18,12 +18,23 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOD = os.path.dirname(HERE)
 CHEF_TOOLS = os.path.normpath(os.path.join(MOD, '..', '..', '_shared', 'Chef-Shared-Loader', 'tools'))
-NAME = 'Impatient Diver (CSL/EAC)'   # what mod loaders show (mod.json's displayName names the GitHub releases)
+NAME = 'Impatient Diver'   # what mod loaders show (mod.json's displayName names the GitHub releases)
 
 sys.path.insert(0, CHEF_TOOLS)
 sys.path.insert(0, HERE)
 import hd2_patch                     # noqa: E402  (Chef Shared Loader's patch writer)
 from pack_addon import HEADER, zip_dir   # noqa: E402  (the Lua patch header Chef Shared Loader ships with)
+
+
+def check_manifest_text(value):
+    """HD2MM v2.0.0-preview2 fails to install a mod with a path separator in its manifest's text."""
+    if isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, list):
+        for item in value:
+            check_manifest_text(item)
+    elif isinstance(value, str):
+        assert '/' not in value and '\\' not in value, 'a path separator in the manifest: ' + value
 
 
 def main():
@@ -70,6 +81,7 @@ def main():
              "misbehaves at start-up until there's a new version.", 'Image': 'icon.png', 'Include': ['intro']},
         ],
     }
+    check_manifest_text(manifest)
     shutil.copy(os.path.join(MOD, 'icon.png'), os.path.join(stage, 'icon.png'))
     json.dump(manifest, open(os.path.join(stage, 'manifest.json'), 'w', encoding='utf-8'), indent=2)
     out = os.path.join(MOD, 'internal', 'build', 'Impatient-Diver-%s.zip' % version)

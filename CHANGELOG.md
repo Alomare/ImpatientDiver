@@ -2,9 +2,18 @@
 
 Releases are named "Impatient Diver V&lt;n&gt;" (tag `v<n>`). Each section is that release's notes.
 
+## V10 (2026-11-09)
+
+- New: Solo Pause, based on code by [Parley6](https://forums.nexusmods.com/profile/106924698-parley6/). It's off by default. Turn it on in the F9 menu, then F6 (you can change the key) pauses the game while no one else is in your session. An optional 1 FPS mode also lowers the frame rate during the pause.
+- Fixed: double-clicking to equip a primary, secondary or grenade in the hellpod's loadout. Each click on those pages was taken for a new drop point.
+- Fixed: the game running at high speed for a few seconds after you gain control at log-in.
+- Fixed: the Intro videos option could override gun sound mods. It now changes only the two sound banks it needs, and the download is about half the size.
+- The mod is now listed as just "Impatient Diver" in mod loaders, which also lets HD2MM v2.0.0-preview2 install it without editing the manifest.
+- The mod no longer keeps game units across a mission, a possible cause of crashes when finishing one.
+
 ## V9 (2026-11-02)
 
-Rebuilt for the current game, which no longer runs LuaJIT: the mod now needs [Chef Shared Loader](https://github.com/Th3chef/Chef-Shared-Loader) 1.5.1 or newer instead of Bingus Shared Loader. Mod loaders list it as Impatient Diver (CSL/EAC).
+Rebuilt for the current game, which no longer runs LuaJIT: the mod now needs [Chef Shared Loader](https://github.com/Th3chef/Chef-Shared-Loader) 1.5.1 or newer instead of Bingus Shared Loader.
 
 - Every skip is automatic, set per scene in the F9 menu: Instant (the default), Fast (8x speed) or Off. Each row says what it skips.
 - Works in a squad, as host or client: joining and leaving lobbies, and right after a mission. The drop zoom follows the host's mod. Picking another drop point zooms quickly again.

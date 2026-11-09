@@ -40,6 +40,7 @@ stingray = {
       if kind == 'external_multiplier' then T.mult = v end
       if kind == 'jump' then T.jump = T.jump + v end   -- in the next frame's step
     end,
+    user_setting = function(key) return T.settings and T.settings[key] end,
     build = function() return 'release' end,
     build_identifier = function() return 'test' end,
   },
@@ -57,7 +58,7 @@ stingray = {
   },
   IdString64 = { from_hex = function(h) return { hex = h } end },
   Unit = {
-    alive = function(u) return u.alive end,
+    alive = function(u) assert(not u.gone, 'a unit from before the mission asked about'); return u.alive end,
     num_cameras = function(u)
       assert(u.kind ~= RUNTIME, 'asked a runtime-built unit for cameras')
       assert(u.alive, 'asked a dead unit for cameras')
@@ -118,6 +119,8 @@ local chef = {
   end,
   get = function(id) return T.rows[id] end,
   on_change = function(id, fn) T.changed[id] = fn; return true end,
+  bind = function(id, key) T.bound = key; return { pressed = function() return T.keys[key] == true end } end,
+  joining = function() return T.joining or 0 end,
   call = function(name, ...)
     local tbl, fn = name:match('^(%w+)%.([%w_]+)$')
     return stingray[tbl][fn](...)
@@ -230,7 +233,7 @@ class Run:
 # log-in intro: fast from the outside shot on, through the walk to the bridge, x1 once the camera goes wide
 r = Run()
 check(r.T.own_log == 'ImpatientDiver', 'own log name')
-check(r.T.title == 'Impatient Diver (CSL/EAC)', 'the F9 menu names the mod Impatient Diver (CSL/EAC)')
+check(r.T.title == 'Impatient Diver', 'the F9 menu names the mod Impatient Diver')
 r.frame(30)
 check(r.rate() == 1, 'nothing sped up on the title screen')
 r.outside(54)
@@ -649,7 +652,7 @@ check(r.rate() == 8, 'still fast in a walk that empties the destroyer\'s world 0
 
 # the F9 menu: a row per scene, Off / Fast (x8) / Instant, Instant by default
 r = Run(mode=None)
-check(sorted(r.T.specs.keys()) == sorted(ROWS), 'a row for each scene')
+check(sorted(r.T.specs.keys()) == sorted(ROWS + ('solo_pause',)), 'a row for each scene, and the solo pause')
 check(all(r.T.rows[row] == INSTANT and r.T.specs[row].choices[2] == 'Fast (x8)' for row in ROWS),
       'every row Off / Fast (x8) / Instant, Instant by default')
 check(any('FTL transition Instant' in l for l in r.lines()), 'the start line names each row\'s mode')
@@ -1373,8 +1376,162 @@ r.frame()
 check(r.rate() == 8, 'a scene at x8')
 r.mod.on_stop()
 check(r.rate() == 1, 'stopped: x1 again')
-check(r.T.title == 'Impatient Diver (CSL/EAC)' and all(len(s.hint) <= 200 for s in r.T.specs.values()),
+check(r.T.title == 'Impatient Diver' and all(len(s.hint) <= 200 for s in r.T.specs.values()),
       'each row has a hint Chef shows whole')
+
+# the solo pause: off by default; the key holds the clock at x0.001, alone only; the 1 FPS choice throttles the engine too
+def throttles(r):
+    kinds = [tuple(p.values())[0] for p in r.T.policy.values()]
+    return [k for k in kinds if k in ('throttle', 'no_throttle')]
+
+
+r = Run(None)
+check(r.T.rows['solo_pause'] == 1 and r.T.bound == 'f6', 'the solo pause is Off by default, on F6')
+r.frame(3, keys=('f6',))
+check(r.rate() == 1 and len(r.T.notes) == 0, 'the row Off: the key does nothing')
+
+r = Run(None)
+r.set('solo_pause', 2)
+r.frame(keys=('f6',))
+check(r.rate() == 0.001 and throttles(r) == [] and list(r.T.notes.values()) == ['PAUSED'], 'On: the key pauses, no throttle')
+r.frame(30)
+check(r.rate() == 0.001, 'the pause holds')
+r.frame(keys=('f6',))
+r.frame()
+check(r.rate() == 1 and list(r.T.notes.values()) == ['PAUSED', 'RESUMED'], 'the key again: normal speed')
+check(any('RATE x0.001' in l for l in r.lines()), 'the pause rate is logged as it is')
+
+r = Run(None)
+r.set('solo_pause', 3)
+r.frame(keys=('f6',))
+check(r.rate() == 0.001 and throttles(r) == ['throttle'], '1 FPS: the engine is throttled too')
+r.set('solo_pause', 2)
+r.frame()
+check(r.rate() == 0.001 and throttles(r) == ['throttle', 'no_throttle'], '1 FPS turned to On while paused: the throttle goes')
+r.set('solo_pause', 3)
+r.frame()
+r.set('solo_pause', 1)
+r.frame(2)
+check(r.rate() == 1 and throttles(r)[-1] == 'no_throttle', 'the row Off while paused: resumed, no throttle')
+
+r = Run(None)
+r.set('solo_pause', 3)
+r.T.players = 2
+r.frame(keys=('f6',))
+check(r.rate() == 1 and throttles(r) == [] and len(r.T.notes) == 1, 'other players in the session: no pause, a notice')
+r.T.players = 1
+r.T.joining = 1
+r.frame(keys=('f6',))
+check(r.rate() == 1 and throttles(r) == [], 'a player joining: no pause')
+r.T.joining = 0
+r.frame(keys=('f6',))
+check(r.rate() == 0.001, 'alone again: the pause works')
+r.T.players = 2
+r.frame(2)
+check(r.rate() == 1 and throttles(r)[-1] == 'no_throttle', 'a player arrives during the pause: resumed, no throttle')
+r.T.players = 1
+r.T.joining = 0
+r.frame(keys=('f6',))
+r.T.joining = 2
+r.frame(2)
+check(r.rate() == 1, 'a player starts joining during the pause: resumed')
+
+# paused in the middle of an Instant scene: no jumps, its waits hold; resumed, it goes on
+r = Run(INSTANT)
+r.set('solo_pause', 2)
+r.outside(54)
+r.do('T.main = T.dest')
+r.frame()
+check(r.speed() == 'jump', 'an Instant scene jumps')
+r.frame(keys=('f6',))
+r.frame(600)
+check(r.rate() == 0.001 and r.T.jump == 0, 'paused in a scene: no jump')
+check(not any('SCENE log-in intro over' in l for l in r.lines()), 'the scene waits out the pause')
+r.frame(keys=('f6',))
+r.frame()
+check(r.speed() == 'jump', 'resumed: the scene goes on')
+
+# the 1 FPS pause over: the player's frame rate limit is back, as the settings say at that moment
+def last_policy(r):
+    return tuple(r.T.policy[len(r.T.policy)].values())
+
+
+def throttle_after_pause(settings):
+    r = Run(None)
+    r.do('T.settings = %s' % settings)
+    r.set('solo_pause', 3)
+    r.frame(keys=('f6',))
+    r.frame(keys=('f6',))
+    r.frame()
+    return [tuple(p.values()) for p in r.T.policy.values() if tuple(p.values())[0] in ('throttle', 'no_throttle')]
+
+
+check(throttle_after_pause('{ framerate_limit_enabled = true, framerate_limit = 72 }') == [('throttle', 1), ('throttle', 72)],
+      "resumed: the game's frame rate limit is back")
+check(throttle_after_pause('{ framerate_limit_enabled = false, framerate_limit = 72 }') == [('throttle', 1), ('no_throttle',)],
+      'resumed with the limit off: no cap')
+check(throttle_after_pause('{ }') == [('throttle', 1), ('no_throttle',)], 'resumed with no setting readable: no cap')
+check(throttle_after_pause('{ framerate_limit = 0 }') == [('throttle', 1), ('no_throttle',)], 'a limit of 0 is no cap')
+r = Run(None)
+r.do('T.settings = { framerate_limit_enabled = true, framerate_limit = 72 }')
+r.set('solo_pause', 3)
+r.frame(keys=('f6',))
+r.do('T.settings.framerate_limit = 144')
+r.frame(keys=('f6',))
+r.frame()
+check([tuple(p.values()) for p in r.T.policy.values() if tuple(p.values())[0] == 'throttle'][-1] == ('throttle', 144),
+      'the limit is read as the pause ends')
+r = Run(None)
+r.do('T.settings = { framerate_limit_enabled = true, framerate_limit = 60 }')
+r.set('solo_pause', 3)
+r.frame(keys=('f6',))
+r.mod.on_stop()
+check([tuple(p.values()) for p in r.T.policy.values() if tuple(p.values())[0] == 'throttle'][-1] == ('throttle', 60),
+      "stopped while paused: the game's limit is back")
+
+# paused during the drop zoom's wait for the loadout page: the wait doesn't run out
+r = Run(INSTANT)
+r.set('solo_pause', 2)
+r.ship()
+r.frame(130)
+r.in_pod()
+r.map_page()
+r.frame(130)
+r.frame(click=True)
+check(any('SCENE drop zoom starts' in l for l in r.lines()), 'a click on the map starts the zoom')
+r.frame(keys=('f6',))
+r.frame(120)
+check(not any('no loadout page after the click' in l for l in r.lines()), "the zoom's wait doesn't run out during a pause")
+
+# after a mission no unit from before it is asked about (the same world, its units replaced), and the camera is found again
+r = Run()
+r.ship()
+r.frame(130)
+r.T.mission = True
+r.frame()
+r.do('for _, u in ipairs(T.ship.units) do u.gone = true end; T.ship.units = { T.camera(0, 0, 0, 0.785) }')
+r.ship()
+r.T.mission = False
+try:
+    r.frame(130)
+    clean = True
+except Exception:
+    clean = False
+check(clean, 'after a mission: no call on a unit from before it')
+check(any('HELLDIVER the only one, solo' in l for l in r.lines()), 'after a mission: our Helldiver found again')
+
+# the mod stopped while paused puts everything back
+r = Run(None)
+r.set('solo_pause', 3)
+r.frame(keys=('f6',))
+r.mod.on_stop()
+check(r.rate() == 1 and throttles(r)[-1] == 'no_throttle', 'stopped while paused: x1, no throttle')
+r = Run(None)
+r.set('solo_pause', 3)
+r.frame(keys=('f6',))
+r.mod.shutdown()
+check(r.rate() == 1 and throttles(r)[-1] == 'no_throttle', 'shutdown while paused: x1, no throttle')
+
 if failures:
     print('FAILED:', *failures, sep='\n  ')
     sys.exit(1)

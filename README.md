@@ -2,7 +2,7 @@
 
 # Impatient Diver
 
-A Helldivers 2 Lua mod for [Chef Shared Loader](https://github.com/Th3chef/Chef-Shared-Loader) that skips the intro videos and the ship's waiting scenes, and takes you from the hellpod straight to the loadout. Mod loaders list it as Impatient Diver (CSL/EAC).
+A Helldivers 2 Lua mod for [Chef Shared Loader](https://github.com/Th3chef/Chef-Shared-Loader) that skips the intro videos and the ship's waiting scenes, and takes you from the hellpod straight to the loadout.
 
 Since V9 it runs on the game's plain Lua 5.1, without FFI or memory access. V8 and older ran on Bingus Shared Loader and can't run on the current game.
 
@@ -14,6 +14,8 @@ Since V9 it runs on the game's plain Lua 5.1, without FFI or memory access. V8 a
 - **FTL transition:** the FTL jump when the ship travels to another planet, and the shots of the ship when you join or leave a lobby. Loading still takes its time.
 - **Hellpod to Loadout:** your Helldiver climbing into the hellpod and the camera moving to the drop location map.
 - **Drop Location Zoom:** the zoom after you pick a drop point, also when you go back to the map and pick another one. In a squad only the host can speed it up: everyone's zoom follows the host's.
+
+- **Solo Pause** (off by default): F6 pauses the game while no one else is in your session. Set it in the F9 menu, where you can change the key and choose whether the frame rate also drops to 1 FPS during the pause. It ends by itself if another player joins.
 
 Each scene is a row in the F9 menu: **Instant** (the default), **Fast** (8x speed) or **Off**. Texts are in English.
 
@@ -31,12 +33,14 @@ The log is `%APPDATA%\Arrowhead\Helldivers2\ImpatientDiver.log`.
 - **Voice languages.** The silent intro covers the English voice line. With another voice language installed, the title video's line still plays over a black screen until you press a key. Untick the Intro videos option if you prefer the full videos.
 - **Game updates.** The Intro videos option carries a copy of two of the game's sound banks (the start-up logos' and the English cutscene voices), as of the build it was made for. If an update changes them, untick the option until there's a new version.
 - **Squadmates** may see your Helldiver leave the cryo pod early. They don't need the mod.
+- **Solo Pause at 1 FPS** reads its key once a frame, so a quick tap may need holding for up to a second to resume.
 - **Picking a drop point again right after going back to the map:** while the camera is still moving back, the zoom plays at normal speed.
 
 ## Technical Details
 
 - **Speed.** Scenes go through the engine's own clock: `Application.set_time_step_policy('external_multiplier', 8)` for Fast, and one `'jump'` of 1 s a frame for Instant, up to a budget per scene, then 8x for what is left. The game ends each scene itself, so your Helldiver is placed and control comes back as always.
 - **Telling the scenes apart.** The mod reads no game memory: it recognises scenes from what the engine's Lua API shows: which worlds exist and what they hold, the main camera, and the Helldiver's animation state.
+- **Solo Pause** uses the same clock at 0.001x. Its 1 FPS mode adds the engine's `'throttle'` policy, and resuming sets the game's own frame rate limit back.
 - **The intro patch** is a data patch, built with Audiodiver's core and FileDiver.
 - **Tests.** `tests/test_release.py` runs the script under Lua 5.1 with a fake loader and engine; `tests/mutate.py` checks that the tests catch each guard being removed.
 
@@ -45,6 +49,7 @@ How it works in the game: [RESEARCH.md](RESEARCH.md). Contributing: [CONTRIBUTIN
 ## Credits
 
 - Runs on [Chef Shared Loader](https://github.com/Th3chef/Chef-Shared-Loader) by Th3chef.
+- Solo Pause is based on code by [Parley6](https://forums.nexusmods.com/profile/106924698-parley6/).
 - Developed with Claude Opus 5.5 and the [HD2 Lua Mod Skill](https://github.com/MrChengl11/hd2-lua-mod-skill).
 - Game data read with [FileDiver](https://github.com/xypwn/filediver).
 
